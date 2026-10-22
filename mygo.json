@@ -1,0 +1,11 @@
+{
+  "name": "Clipboard History",
+  "identifier": "com.clipboardhistory.app",
+  "version": "1.0.0",
+  "copyright": "Copyright © 2026 Clipboard History contributors",
+  "icon": "resources/icon.png",
+  "out": "build",
+  "linux": {
+    "webview": false
+  }
+}

@@ -1,0 +1,9 @@
+/build/
+/.mygo/
+mygo_windows_*.syso
+
+my-go-app.exe
+*.exe
+
+.fluent-dump/
+
