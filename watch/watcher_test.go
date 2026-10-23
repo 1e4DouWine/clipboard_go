@@ -16,10 +16,11 @@ import (
 //   - seq 非空时按序弹出文本（模拟复制过程中内容变化）；
 //   - 无更多脚本时返回 sticky 的 text/image 值。
 type fakeClipboard struct {
-	mu    sync.Mutex
-	seq   []string // 待弹出的文本序列
-	text  string   // 当前文本（粘性）
-	image []byte   // 当前图片（粘性）
+	mu       sync.Mutex
+	seq      []string // 待弹出的文本序列
+	imageSeq [][]byte // 待弹出的图片序列
+	text     string   // 当前文本（粘性）
+	image    []byte   // 当前图片（粘性）
 }
 
 func (f *fakeClipboard) ReadText() string {
@@ -35,6 +36,10 @@ func (f *fakeClipboard) ReadText() string {
 func (f *fakeClipboard) ReadImage() []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.imageSeq) > 0 {
+		f.image = f.imageSeq[0]
+		f.imageSeq = f.imageSeq[1:]
+	}
 	return f.image
 }
 
@@ -152,6 +157,38 @@ func TestPollDebounce(t *testing.T) {
 	items := listAll(t, st)
 	if len(items) != 1 || items[0].FullText != "abc" {
 		t.Fatalf("期望只入库稳定后的 abc，实际 %+v", items)
+	}
+}
+
+func TestPollDropsContentWhenConfirmationIsEmpty(t *testing.T) {
+	clip := &fakeClipboard{seq: []string{"transient text", ""}}
+	w, st := newTestWatcher(t, clip, nil)
+
+	w.poll(context.Background())
+
+	if items := listAll(t, st); len(items) != 0 {
+		t.Fatalf("确认读取为空时不应保存首次瞬态内容，实际 %+v", items)
+	}
+}
+
+func TestPollDropsTransientImageWhenConfirmationReturnsToLastImage(t *testing.T) {
+	last := []byte("previous image")
+	clip := &fakeClipboard{image: last}
+	w, st := newTestWatcher(t, clip, nil)
+	w.poll(context.Background())
+
+	clip.mu.Lock()
+	clip.imageSeq = [][]byte{[]byte("transient image"), last}
+	clip.mu.Unlock()
+	w.poll(context.Background())
+
+	items := listAll(t, st)
+	if len(items) != 1 || items[0].Kind != store.KindImage {
+		t.Fatalf("确认时回到上次图片后不应保存瞬态图片，实际 %+v", items)
+	}
+	got, err := st.ReadImage(items[0])
+	if err != nil || string(got) != string(last) {
+		t.Fatalf("应保留此前图片，got=%q err=%v", got, err)
 	}
 }
 

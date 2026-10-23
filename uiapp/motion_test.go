@@ -1,4 +1,4 @@
-package main
+package uiapp
 
 import (
 	"testing"
@@ -38,11 +38,11 @@ func TestStarPose(t *testing.T) {
 
 // TestViewWithAnimations 验证带动画的视图正常渲染（文本不丢失）。
 func TestViewWithAnimations(t *testing.T) {
-	a := &app{items: []store.Entry{
+	h := &harness{items: []store.Entry{
 		{ID: 1, Kind: store.KindText, Preview: "anim one", CopiedAt: 1700000000000, IsFavorite: true},
 		{ID: 2, Kind: store.KindLink, Preview: "https://anim.dev", CopiedAt: 1700000000000},
 	}}
-	tt := ui.NewTester(a.view, 560, 520)
+	tt := ui.NewTester(h.presenter().View, 560, 520)
 	// 动画不改变内容语义：预览、徽标、星标均应渲染。
 	for _, want := range []string{"anim one", "https://anim.dev", "URL", "★", "☆"} {
 		if !tt.HasText(want) {
@@ -54,13 +54,13 @@ func TestViewWithAnimations(t *testing.T) {
 // TestViewAnimationsReduceMotion 验证"减少动态效果"降级路径：
 // 系统开启 ReduceMotion 时 mygo 动画自动降级，视图必须照常渲染不丢内容。
 func TestViewAnimationsReduceMotion(t *testing.T) {
-	a := &app{
+	h := &harness{
 		items: []store.Entry{
 			{ID: 1, Kind: store.KindText, Preview: "calm entry", CopiedAt: 1700000000000},
 		},
 		status: "已复制",
 	}
-	tt := ui.NewTester(a.view, 560, 520)
+	tt := ui.NewTester(h.presenter().View, 560, 520)
 	tt.SetPreferences(ui.Preferences{ReduceMotion: true, TextScale: 1})
 
 	// 重建一帧：降级路径下内容完整。
@@ -75,15 +75,55 @@ func TestViewAnimationsReduceMotion(t *testing.T) {
 // TestViewStatusFade 验证状态栏淡入在有/无状态时均正常。
 func TestViewStatusFade(t *testing.T) {
 	// 有状态：状态文案渲染。
-	a := &app{status: "粘贴成功"}
-	tt := ui.NewTester(a.view, 560, 520)
+	h := &harness{status: "粘贴成功"}
+	tt := ui.NewTester(h.presenter().View, 560, 520)
 	if !tt.HasText("粘贴成功") {
 		t.Errorf("expected status text, texts %q", tt.Texts())
 	}
 	// 无状态：快捷键帮助渲染。
-	b := &app{}
-	tt2 := ui.NewTester(b.view, 560, 520)
+	b := &harness{}
+	tt2 := ui.NewTester(b.presenter().View, 560, 520)
 	if !tt2.HasText("↑↓ Choose") {
 		t.Errorf("expected shortcuts hint, texts %q", tt2.Texts())
+	}
+}
+
+// TestChipColors 验证类型徽标配色策略（语义色 + 半透明底，明暗主题自动适配）。
+func TestChipColors(t *testing.T) {
+	th := ui.LightTheme()
+	// URL 用 Accent、CODE 用 Warning、IMG 用 Success、TXT 用 TextMuted。
+	cases := map[store.Kind]ui.Color{
+		store.KindLink:  th.Accent,
+		store.KindCode:  th.Warning,
+		store.KindImage: th.Success,
+		store.KindText:  th.TextMuted,
+	}
+	for kind, want := range cases {
+		fg, bg := chipColors(th, kind)
+		if fg != want {
+			t.Errorf("chipColors(%q) 前景色 = %v，期望 %v", kind, fg, want)
+		}
+		if bg.A == 0 {
+			t.Errorf("chipColors(%q) 背景色不应全透明", kind)
+		}
+	}
+	// 暗黑主题下同样返回非零配色（自动适配验证）。
+	dark := ui.DarkTheme()
+	if fg, bg := chipColors(dark, store.KindLink); fg != dark.Accent || bg.A == 0 {
+		t.Error("暗黑主题下 chip 配色未适配")
+	}
+}
+
+// TestKindBadgeAndMeta 验证徽标文案与元信息行。
+func TestKindBadgeAndMeta(t *testing.T) {
+	if got := kindBadge(store.KindImage); got != "IMG" {
+		t.Fatalf("kindBadge(IMG) = %q", got)
+	}
+	if got := kindBadge(store.KindText); got != "TXT" {
+		t.Fatalf("kindBadge(TXT) = %q", got)
+	}
+	e := store.Entry{CopiedAt: 1700000000000, SourceApp: "VS Code"}
+	if got := metaLine(e); got == "" {
+		t.Fatal("metaLine 不应为空")
 	}
 }

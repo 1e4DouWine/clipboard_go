@@ -1,6 +1,6 @@
 // Package hotkey 负责全局快捷键：语法校验、注册与改键、冲突处理、自定义持久化。
 //
-// 设计要点（见 docs/DESIGN.md §5）：
+// 设计要点：
 //   - 语法与 mygo 的 accelerator.Parse 保持一致（Electron 风格，如 "Ctrl+Shift+V"）；
 //   - 额外施加"全局安全策略"：会劫持日常输入的按键必须携带 Ctrl/Alt/Super 修饰键，
 //     防止用户把裸字母/裸方向键设成全局热键后无法正常打字；

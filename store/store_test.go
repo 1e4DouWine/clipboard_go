@@ -389,6 +389,101 @@ func TestBriefQueries(t *testing.T) {
 	}
 }
 
+// TestListFilteredPushesFiltersDown 验证过滤在 SQL 层完成：
+// LIMIT 作用于过滤之后的结果。
+//
+// 这正是老问题的修复点：先取"最新 N 条"再在内存里按类型过滤时，
+// 若最新 N 条里恰好没有图片，图片分类就会显示为空——更早的图片永远看不到。
+func TestListFilteredPushesFiltersDown(t *testing.T) {
+	s := newTestStore(t, Options{})
+
+	// 5 条文本 + 3 条图片（图片内容各不相同，避免去重合并）。
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddText("plain text "+string(rune('a'+i)), "app"); err != nil {
+			t.Fatalf("AddText 失败: %v", err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.AddImage([]byte{byte(i), 0x89, 'P', 'N', 'G'}, "app"); err != nil {
+			t.Fatalf("AddImage 失败: %v", err)
+		}
+	}
+
+	// 只看图片，limit=2：应返回 2 张图片（而非"最新 2 条里没有图片"）。
+	imgs, err := s.ListFiltered(Filter{Kind: KindImage}, 2)
+	if err != nil {
+		t.Fatalf("ListFiltered 失败: %v", err)
+	}
+	if len(imgs) != 2 {
+		t.Fatalf("图片过滤应返回 2 条，实际 %d", len(imgs))
+	}
+	for _, e := range imgs {
+		if e.Kind != KindImage {
+			t.Fatalf("应只返回图片，实际 %+v", e)
+		}
+	}
+
+	// 只看文本，limit=2：应返回 2 条文本。
+	texts, err := s.ListFiltered(Filter{Kind: KindText}, 2)
+	if err != nil {
+		t.Fatalf("ListFiltered 失败: %v", err)
+	}
+	if len(texts) != 2 {
+		t.Fatalf("文本过滤应返回 2 条，实际 %d", len(texts))
+	}
+	for _, e := range texts {
+		if e.Kind != KindText {
+			t.Fatalf("应只返回文本，实际 %+v", e)
+		}
+	}
+}
+
+// TestListFilteredCombinesConditions 验证关键字、类型、收藏三个条件可叠加。
+func TestListFilteredCombinesConditions(t *testing.T) {
+	s := newTestStore(t, Options{})
+
+	if _, err := s.AddText("alpha plain", "app"); err != nil {
+		t.Fatalf("AddText 失败: %v", err)
+	}
+	link, err := s.AddText("https://example.com/alpha", "app")
+	if err != nil {
+		t.Fatalf("AddText 失败: %v", err)
+	}
+	if _, err := s.AddText("beta plain", "app"); err != nil {
+		t.Fatalf("AddText 失败: %v", err)
+	}
+	if _, err := s.ToggleFavorite(link.ID); err != nil {
+		t.Fatalf("ToggleFavorite 失败: %v", err)
+	}
+
+	// 关键字 + 链接类型：只剩那一条链接。
+	items, err := s.ListFiltered(Filter{Text: "alpha", Kind: KindLink}, 0)
+	if err != nil {
+		t.Fatalf("ListFiltered 失败: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != link.ID {
+		t.Fatalf("关键字+类型应只剩 1 条链接，实际 %+v", items)
+	}
+
+	// 关键字 + 收藏：只剩被收藏的那条。
+	items, err = s.ListFiltered(Filter{Text: "alpha", FavoritesOnly: true}, 0)
+	if err != nil {
+		t.Fatalf("ListFiltered 失败: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != link.ID {
+		t.Fatalf("关键字+收藏应只剩 1 条，实际 %+v", items)
+	}
+
+	// 关键字命中但类型不符：应为空（条件是 AND，不是 OR）。
+	items, err = s.ListFiltered(Filter{Text: "beta", Kind: KindLink}, 0)
+	if err != nil {
+		t.Fatalf("ListFiltered 失败: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("类型不符时应为空，实际 %+v", items)
+	}
+}
+
 // TestClosedStore 验证 Close 之后调用返回 ErrClosed，且 Close 幂等。
 func TestClosedStore(t *testing.T) {
 	s := newTestStore(t, Options{})

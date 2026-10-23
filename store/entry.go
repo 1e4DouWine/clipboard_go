@@ -32,7 +32,7 @@ type Entry struct {
 	CopiedAt    int64  // 最近一次复制时间（Unix 毫秒）
 }
 
-// 入库相关的尺寸限制（对应 docs/DESIGN.md §3.3 边界约定）。
+// 入库相关的尺寸限制（超限即拒绝或截断，见 AddText / AddImage）。
 const (
 	// MaxTextBytes 是单条文本入库上限，超出部分截断（保留前缀）。
 	MaxTextBytes = 256 * 1024

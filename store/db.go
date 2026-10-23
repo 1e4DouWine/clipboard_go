@@ -1,6 +1,6 @@
 // Package store 负责剪贴板历史的持久化存储。
 //
-// 设计要点（见 docs/DESIGN.md §3）：
+// 设计要点：
 //   - 元数据（条目内容、收藏标记、设置项）存 SQLite（modernc.org/sqlite，纯 Go 无 CGO）；
 //   - 图片二进制存 dataDir/images/ 下的独立文件，数据库只存相对路径，避免库文件膨胀；
 //   - 所有公开方法可被多个 goroutine 并发调用（内部用互斥锁串行化写操作）；
@@ -166,6 +166,8 @@ func (s *Store) migrate() error {
 		)`,
 		// 列表排序走该索引：收藏优先 + 时间倒序
 		`CREATE INDEX IF NOT EXISTS idx_entries_copied ON entries(is_favorite, copied_at DESC)`,
+		// 分类筛选（只看文本/链接/代码/图片）走该索引
+		`CREATE INDEX IF NOT EXISTS idx_entries_kind ON entries(kind)`,
 		// settings：键值对配置（快捷键、历史上限、轮询间隔等）
 		`CREATE TABLE IF NOT EXISTS settings (
 			key   TEXT PRIMARY KEY,

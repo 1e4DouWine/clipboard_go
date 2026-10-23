@@ -202,9 +202,11 @@ func (w *Watcher) poll(ctx context.Context) {
 		return
 	case <-time.After(w.settle):
 	}
-	if snap2, hash2, unchanged2 := w.readSnapshot(); hash2 != "" && !unchanged2 {
-		snap, hash = snap2, hash2
+	snap2, hash2, unchanged2 := w.readSnapshot()
+	if hash2 == "" || unchanged2 {
+		return // 确认时内容已清空或回到已记录图片，丢弃瞬态采样
 	}
+	snap, hash = snap2, hash2
 	if w.sameAsLast(hash) {
 		return // 确认后内容回落到上次值，无需处理
 	}
@@ -333,8 +335,8 @@ func (w *Watcher) isSensitive(title string) bool {
 	return false
 }
 
-// hashBytes 计算内容的 sha256 十六进制摘要（与 store 的去重键算法一致）。
-func hashBytes(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
+// hashBytes 计算内容的 sha256 十六进制摘要。
+//
+// 复用 store 的实现：监听器与存储层必须用同一套哈希算法，
+// 否则"上次已入库"的判定会与去重键漂移。
+func hashBytes(b []byte) string { return store.HashBytes(b) }

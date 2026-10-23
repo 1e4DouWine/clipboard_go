@@ -1,15 +1,12 @@
-// Package applog 提供统一的应用日志与 panic 兜底能力。
+// Package applog 提供统一的应用日志能力。
 //
 // 背景：桌面应用（无控制台）运行时，标准库 log 默认输出 stderr 会直接丢失，
 // 出问题无从排查。本包把日志落盘到用户日志目录，并做大小轮转防止无限增长；
-// 同时提供 goroutine/视图的 panic 兜底——局部崩溃记录后降级，不拖垮整个应用。
 //
 // 设计要点：
 //   - 落盘 + stderr 双写（MultiWriter）：GUI 运行看文件，开发运行看终端；
 //   - 轮转策略：app.log 超过 maxLogSize 时整体改名为 app.log.1（保留 1 份），
 //     简单可靠、无外部依赖；轮转失败不阻塞日志（宁可文件大，不可丢日志）；
-//   - Recover 供 goroutine 的 defer 使用：panic 记录堆栈后 goroutine 正常退出，
-//     不导致进程崩溃；
 //   - 所有函数并发安全（标准库 log 本身线程安全）。
 package applog
 
@@ -19,7 +16,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 )
 
 // 日志文件参数。
@@ -101,26 +97,4 @@ func rotateIfNeeded(path string) error {
 	// Windows 上目标存在时 Rename 会失败，先删旧备份（保留失败可接受）。
 	_ = os.Remove(backup)
 	return os.Rename(path, backup)
-}
-
-// Recover 在 goroutine 顶部 defer：panic 记录堆栈后正常返回，
-// goroutine 干净退出而不使进程崩溃。
-//
-// 用法：
-//
-//	go func() {
-//	    defer applog.Recover("watch-loop")
-//	    ...
-//	}()
-func Recover(name string) {
-	if r := recover(); r != nil {
-		LogPanic(name, r)
-	}
-}
-
-// LogPanic 记录 panic 值与完整堆栈（Recover 与视图兜底共用）。
-// 独立导出：调用方可能自行 recover 后需要统一格式的记录。
-func LogPanic(name string, r any) {
-	// debug.Stack() 包含 panic 现场的完整调用链，是定位崩溃的关键信息。
-	log.Printf("PANIC recovered in %s: %v\n%s", name, r, debug.Stack())
 }

@@ -8,21 +8,6 @@ import (
 	"testing"
 )
 
-// captureLog 把标准库 log 输出重定向到内存缓冲区，测试结束恢复。
-func captureLog(t *testing.T) *strings.Builder {
-	t.Helper()
-	buf := &strings.Builder{}
-	prev := log.Writer()
-	prevFlags := log.Flags()
-	log.SetOutput(buf)
-	log.SetFlags(0) // 测试断言不含时间戳前缀
-	t.Cleanup(func() {
-		log.SetOutput(prev)
-		log.SetFlags(prevFlags)
-	})
-	return buf
-}
-
 // TestSetupWritesToFile 验证日志落盘与内容写入。
 func TestSetupWritesToFile(t *testing.T) {
 	dir := t.TempDir()
@@ -114,48 +99,5 @@ func TestNoRotateWhenSmall(t *testing.T) {
 func TestRotateMissingFileIsNoop(t *testing.T) {
 	if err := rotateIfNeeded(filepath.Join(t.TempDir(), "nope.log")); err != nil {
 		t.Fatalf("不存在的文件应 no-op，实际: %v", err)
-	}
-}
-
-// TestRecoverCatchesPanic 验证 Recover 捕获 panic 并记录堆栈，不向外传播。
-func TestRecoverCatchesPanic(t *testing.T) {
-	buf := captureLog(t)
-
-	panicky := func() {
-		defer Recover("test-goroutine")
-		panic("boom")
-	}
-	panicky() // 不应使测试崩溃
-
-	out := buf.String()
-	if !strings.Contains(out, "PANIC recovered in test-goroutine") {
-		t.Fatalf("应记录 panic 标识，实际: %q", out)
-	}
-	if !strings.Contains(out, "boom") {
-		t.Fatalf("应记录 panic 值，实际: %q", out)
-	}
-	if !strings.Contains(out, "goroutine") {
-		t.Fatalf("应记录堆栈，实际: %q", out)
-	}
-}
-
-// TestRecoverNoopWhenNoPanic 验证无 panic 时 Recover 静默。
-func TestRecoverNoopWhenNoPanic(t *testing.T) {
-	buf := captureLog(t)
-	func() {
-		defer Recover("calm")
-	}()
-	if buf.Len() != 0 {
-		t.Fatalf("无 panic 不应有输出，实际: %q", buf.String())
-	}
-}
-
-// TestLogPanicFormat 验证 LogPanic 独立可用（自定义 recover 场景）。
-func TestLogPanicFormat(t *testing.T) {
-	buf := captureLog(t)
-	LogPanic("custom", "custom-error")
-	out := buf.String()
-	if !strings.Contains(out, "PANIC recovered in custom") || !strings.Contains(out, "custom-error") {
-		t.Fatalf("LogPanic 输出异常: %q", out)
 	}
 }
