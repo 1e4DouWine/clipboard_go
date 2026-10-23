@@ -1,8 +1,8 @@
 {
-  "name": "Clipboard History",
-  "identifier": "com.clipboardhistory.app",
+  "name": "Clipboard-go",
+  "identifier": "com.clipboardgo.app",
   "version": "1.0.0",
-  "copyright": "Copyright © 2026 Clipboard History contributors",
+  "copyright": "Copyright © 2026 Clipboard-go contributors",
   "icon": "resources/icon.png",
   "out": "build",
   "linux": {

@@ -35,7 +35,7 @@ func (s *Store) AddImage(data []byte, sourceApp string) (Entry, error) {
 		return Entry{}, ErrTooLarge
 	}
 
-	hash := hashBytes(data)
+	hash := HashBytes(data)
 	relPath := filepath.ToSlash(filepath.Join(imagesDirName, hash+imageExt))
 	preview := imagePreview(data)
 	now := time.Now().UnixMilli()

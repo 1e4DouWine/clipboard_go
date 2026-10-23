@@ -59,12 +59,35 @@ type keyboardInput struct {
 	dwExtraInfo uintptr
 }
 
+// mouseInput 对应 Win32 MOUSEINPUT 结构。
+//
+// 它在 INPUT 的匿名 union 里不直接使用，但 union 的尺寸由最大的成员决定
+// （MOUSEINPUT：x64 为 32 字节，x86 为 24 字节），必须按它的尺寸占位。
+type mouseInput struct {
+	dx, dy    int32
+	mouseData uint32
+	flags     uint32
+	time      uint32
+	extraInfo uintptr
+}
+
+// inputUnion 对应 Win32 INPUT 的匿名 union：键盘分支在前，
+// 其余字节按最大成员（MOUSEINPUT）补齐，保证 32/64 位下与 C 布局一致。
+type inputUnion struct {
+	ki keyboardInput
+	_  [unsafe.Sizeof(mouseInput{}) - unsafe.Sizeof(keyboardInput{})]byte
+}
+
 // input 对应 Win32 INPUT 结构（仅键盘分支）。
-// 字段顺序与对齐必须与 C 结构一致：type(4) + 隐式对齐(4) + KEYBDINPUT(24) = 32 字节。
+//
+// 布局：type(4) + 隐式对齐(4) + union(32) = 40 字节（x64）；
+// x86 下为 type(4) + union(24) = 28 字节。
+//
+// 尺寸必须与 sizeof(INPUT) 完全一致：SendInput 以 cbSize 校验结构体大小，
+// 不一致时直接失败（ERROR_INVALID_PARAMETER），按键注入会静默失效。
 type input struct {
 	typ uint32
-	_   uint32 // 占位：union 起始对齐到 8 字节
-	ki  keyboardInput
+	u   inputUnion
 }
 
 // Capture 记录当前前台窗口作为粘贴目标。
@@ -104,10 +127,10 @@ func Paste(t Target) error {
 
 	// 注入 Ctrl+V：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
 	inputs := [4]input{
-		{typ: inputKeyboard, ki: keyboardInput{wVk: vkControl}},
-		{typ: inputKeyboard, ki: keyboardInput{wVk: vkV}},
-		{typ: inputKeyboard, ki: keyboardInput{wVk: vkV, dwFlags: keyeventfKeyup}},
-		{typ: inputKeyboard, ki: keyboardInput{wVk: vkControl, dwFlags: keyeventfKeyup}},
+		{typ: inputKeyboard, u: inputUnion{ki: keyboardInput{wVk: vkControl}}},
+		{typ: inputKeyboard, u: inputUnion{ki: keyboardInput{wVk: vkV}}},
+		{typ: inputKeyboard, u: inputUnion{ki: keyboardInput{wVk: vkV, dwFlags: keyeventfKeyup}}},
+		{typ: inputKeyboard, u: inputUnion{ki: keyboardInput{wVk: vkControl, dwFlags: keyeventfKeyup}}},
 	}
 	sent, _, callErr := procSendInput.Call(
 		uintptr(len(inputs)),
@@ -117,7 +140,10 @@ func Paste(t Target) error {
 	// SendInput 返回实际注入的事件数；少于预期说明部分/全部被拒绝
 	//（UIPI 会阻止向更高完整性级别的窗口注入）。
 	if sent != uintptr(len(inputs)) {
-		return errors.New("fastpaste: 按键注入被目标拒绝（UIPI/安全限制）: " + callErr.Error())
+		if callErr != nil {
+			return errors.New("fastpaste: 按键注入被目标拒绝（UIPI/安全限制）: " + callErr.Error())
+		}
+		return errors.New("fastpaste: 按键注入被目标拒绝（UIPI/安全限制）")
 	}
 	return nil
 }

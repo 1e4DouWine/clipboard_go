@@ -19,6 +19,21 @@ type fakeBackend struct {
 	regCalls int               // Register 调用次数（验证幂等/无谓抖动）
 }
 
+// blockingBackend pauses the first backend registration so the test can
+// attempt a concurrent unregister at the exact transition point.
+type blockingBackend struct {
+	*fakeBackend
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingBackend) Register(acc string, fn func()) error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.fakeBackend.Register(acc, fn)
+}
+
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
 		handlers: map[string]func(){},
@@ -596,6 +611,45 @@ func TestConcurrentSafety(t *testing.T) {
 	wg.Wait()
 	if n := backend.registeredCount(); n != 0 {
 		t.Fatalf("并发注销后应清空，实际残留 %d 个", n)
+	}
+}
+
+func TestRegisterAndUnregisterAreAtomicWithBackend(t *testing.T) {
+	backend := &blockingBackend{
+		fakeBackend: newFakeBackend(),
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	m, err := New(backend)
+	if err != nil {
+		t.Fatalf("New 失败: %v", err)
+	}
+
+	registered := make(chan error, 1)
+	go func() { registered <- m.Register("act", "Ctrl+Shift+R", noop) }()
+	<-backend.entered
+
+	unregistered := make(chan struct{})
+	go func() {
+		m.Unregister("act")
+		close(unregistered)
+	}()
+	select {
+	case <-unregistered:
+		t.Fatal("Unregister 不应在 Register 的后端调用完成前修改状态")
+	default:
+	}
+
+	close(backend.release)
+	if err := <-registered; err != nil {
+		t.Fatalf("Register 失败: %v", err)
+	}
+	<-unregistered
+	if backend.registeredCount() != 0 {
+		t.Fatalf("并发注销后后端不应残留快捷键，实际 %d", backend.registeredCount())
+	}
+	if _, ok := m.Accelerator("act"); ok {
+		t.Fatal("并发注销后 Manager 不应残留绑定")
 	}
 }
 

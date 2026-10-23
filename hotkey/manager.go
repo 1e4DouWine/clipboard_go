@@ -25,12 +25,20 @@ type Backend interface {
 //   - 过期触发过滤：改键后旧键的残余触发不会命中 handler。
 //
 // 并发约定（重要）：
-//   - 所有方法可并发调用；内部按"先登记后提交"的三段式流程执行，
-//     任何阶段都不在调用 Backend 的同时持有内部锁；
+//   - 所有方法可并发调用；注册/注销操作由 backendMu 串行化，
+//     任何阶段都不在调用 Backend 的同时持有内部状态锁；
 //   - handler 由 Backend（mygo）在主线程调用。为避免与注册流程互相等待，
 //     handler 内不得同步调用 Manager 的注册/注销方法，应只做 UI 展示类工作。
 type Manager struct {
 	backend Backend
+
+	// backendMu serializes the state transition and the corresponding backend
+	// calls. Without it, Unregister can remove a provisional mapping while a
+	// concurrent Register is still waiting in Backend.Register; when that
+	// registration then succeeds, the backend retains an untracked shortcut.
+	// Handlers must not synchronously call Manager registration methods because
+	// a backend is allowed to invoke them while a registration is in progress.
+	backendMu sync.Mutex
 
 	mu       sync.Mutex        // 保护下面三张表；绝不跨 Backend 调用持有
 	byAction map[string]string // action → 规范快捷键
@@ -71,6 +79,15 @@ func (m *Manager) Register(action, acc string, fn func()) error {
 	if err != nil {
 		return err
 	}
+	m.backendMu.Lock()
+	defer m.backendMu.Unlock()
+	return m.registerCanonical(action, canon, fn)
+}
+
+// registerCanonical performs one complete registration transition. The
+// caller must hold backendMu so state and backend cannot be interleaved with
+// another registration or unregistration.
+func (m *Manager) registerCanonical(action, canon string, fn func()) error {
 
 	// ── 第一段：在锁内做决策登记（不调用 Backend）──
 	m.mu.Lock()
@@ -93,7 +110,7 @@ func (m *Manager) Register(action, acc string, fn func()) error {
 	m.mu.Unlock()
 
 	// ── 第二段：调用 Backend（不持锁，避免主线程回调死锁）──
-	if err := m.backend.Register(acc, m.wrap(action, canon)); err != nil {
+	if err := m.backend.Register(canon, m.wrap(action, canon)); err != nil {
 		// 回滚预登记，保持表与 Backend 一致。
 		m.mu.Lock()
 		if m.byAcc[canon] == action {
@@ -129,17 +146,29 @@ func (m *Manager) Register(action, acc string, fn func()) error {
 // Reregister 为已注册的 action 更换快捷键（handler 保持不变）。
 // action 未注册返回 ErrUnknownAction。
 func (m *Manager) Reregister(action, acc string) error {
+	m.backendMu.Lock()
+	defer m.backendMu.Unlock()
 	m.mu.Lock()
 	fn := m.handlers[action]
 	m.mu.Unlock()
 	if fn == nil {
 		return fmt.Errorf("%w: %q", ErrUnknownAction, action)
 	}
-	return m.Register(action, acc, fn)
+	canon, err := normalize(acc)
+	if err != nil {
+		return err
+	}
+	return m.registerCanonical(action, canon, fn)
 }
 
 // Unregister 注销 action 的全局快捷键。未注册时为安全的 no-op（幂等）。
 func (m *Manager) Unregister(action string) {
+	m.backendMu.Lock()
+	defer m.backendMu.Unlock()
+	m.unregisterCanonical(action)
+}
+
+func (m *Manager) unregisterCanonical(action string) {
 	m.mu.Lock()
 	canon, ok := m.byAction[action]
 	delete(m.byAction, action)
@@ -157,6 +186,8 @@ func (m *Manager) Unregister(action string) {
 
 // UnregisterAll 注销全部绑定（应用退出时调用）。
 func (m *Manager) UnregisterAll() {
+	m.backendMu.Lock()
+	defer m.backendMu.Unlock()
 	m.mu.Lock()
 	accs := make([]string, 0, len(m.byAction))
 	for action, canon := range m.byAction {
@@ -183,6 +214,8 @@ func (m *Manager) Accelerator(action string) (string, bool) {
 // Registered 报告 action 的快捷键当前是否真实注册在 Backend 上
 // （可用于诊断"注册表有记录但被系统强制注销"的异常）。
 func (m *Manager) Registered(action string) bool {
+	m.backendMu.Lock()
+	defer m.backendMu.Unlock()
 	m.mu.Lock()
 	canon, ok := m.byAction[action]
 	m.mu.Unlock()

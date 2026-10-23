@@ -133,24 +133,27 @@ func Change(m *Manager, s *store.Store, action, acc string) error {
 	if m == nil || s == nil {
 		return fmt.Errorf("hotkey: manager/store 不能为空")
 	}
-	if _, err := normalize(acc); err != nil {
+	canon, err := normalize(acc)
+	if err != nil {
 		return err // 先整体校验，失败不产生任何副作用
 	}
+	m.backendMu.Lock()
+	defer m.backendMu.Unlock()
 	fn := m.handler(action)
 	if fn == nil {
 		return fmt.Errorf("%w: %q", ErrUnknownAction, action)
 	}
 	old, hadOld := m.Accelerator(action)
 
-	if err := m.Register(action, acc, fn); err != nil {
+	if err := m.registerCanonical(action, canon, fn); err != nil {
 		return err // 注册失败时 Register 内部已保持原绑定不动
 	}
 	if err := SaveAccelerator(s, action, acc); err != nil {
 		// 持久化失败：回滚注册，保持配置与实际一致。
 		if hadOld {
-			_ = m.Register(action, old, fn) // 回滚失败概率极低（旧键此前一直可用）
+			_ = m.registerCanonical(action, old, fn) // 回滚失败概率极低（旧键此前一直可用）
 		} else {
-			m.Unregister(action)
+			m.unregisterCanonical(action)
 		}
 		return err
 	}

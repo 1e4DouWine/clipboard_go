@@ -27,6 +27,16 @@ var (
 // DefaultMaxEntries 是默认历史条目上限（含收藏）。
 const DefaultMaxEntries = 10000
 
+// Filter 描述一次列表查询的过滤条件（各项皆可选，零值 = 不过滤）。
+type Filter struct {
+	// Text 为关键字；空白表示不过滤（LIKE 转义由 store 内部完成）。
+	Text string
+	// Kind 为内容类型；空串表示不限类型。
+	Kind Kind
+	// FavoritesOnly 为真时只返回收藏条目。
+	FavoritesOnly bool
+}
+
 // Options 是 Open 的可选配置项。
 type Options struct {
 	// MaxEntries 为历史条目总数上限（含收藏条目）；<=0 时取 DefaultMaxEntries。
@@ -69,7 +79,7 @@ func (s *Store) AddText(text, sourceApp string) (Entry, error) {
 	}
 
 	full, truncated := truncateText(text, MaxTextBytes)
-	hash := hashBytes([]byte(full))
+	hash := HashBytes([]byte(full))
 	preview := makePreview(full)
 	if truncated {
 		preview += "（已截断）" // 明示用户内容不完整，避免误以为全文已存
@@ -128,25 +138,13 @@ func (s *Store) Get(id int64) (Entry, error) {
 // 注意：含 full_text 的完整加载仅适合小数据量场景（如测试/导出）。
 // 列表 UI 请用 ListBrief 避免全文常驻内存。
 func (s *Store) List(limit int) ([]Entry, error) {
-	query := selectColumns + ` ORDER BY is_favorite DESC, copied_at DESC`
-	args := []any{}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	return s.queryEntries(query, args...)
+	return s.listFiltered(Filter{}, limit, false)
 }
 
 // ListBrief 与 List 排序一致，但不加载 full_text（返回的 Entry.FullText 为空）。
 // 全文可通过 Get(id) 按需读取——列表展示/过滤场景专用，显著降低内存峰值。
 func (s *Store) ListBrief(limit int) ([]Entry, error) {
-	query := selectColumnsBrief + ` ORDER BY is_favorite DESC, copied_at DESC`
-	args := []any{}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	return s.queryEntries(query, args...)
+	return s.listFiltered(Filter{}, limit, true)
 }
 
 // Search 按关键字过滤历史（大小写不敏感，基于 SQLite LIKE）。
@@ -154,39 +152,56 @@ func (s *Store) ListBrief(limit int) ([]Entry, error) {
 //
 // 注意：含 full_text 的完整加载仅适合小数据量场景；列表 UI 请用 SearchBrief。
 func (s *Store) Search(query string, limit int) ([]Entry, error) {
-	return s.searchWith(query, limit, false)
+	return s.listFiltered(Filter{Text: query}, limit, false)
 }
 
 // SearchBrief 与 Search 结果集一致，但不加载 full_text（Entry.FullText 为空）。
 // 搜索仍匹配 full_text 列（全文检索语义不变），只是不把全文取回内存。
 func (s *Store) SearchBrief(query string, limit int) ([]Entry, error) {
-	return s.searchWith(query, limit, true)
+	return s.listFiltered(Filter{Text: query}, limit, true)
 }
 
-// searchWith 是 Search/SearchBrief 的共用实现。
-func (s *Store) searchWith(query string, limit int, brief bool) ([]Entry, error) {
-	q := strings.TrimSpace(query)
-	if q == "" {
-		// 边界：空查询回退全量。
-		if brief {
-			return s.ListBrief(limit)
-		}
-		return s.List(limit)
-	}
+// ListFiltered 按过滤条件返回历史（不含 full_text，列表专用）。
+//
+// 过滤在 SQL 层完成：类型/收藏/关键字一起下推到 WHERE，LIMIT 作用于
+// 过滤之后的结果——因此"只看图片"不会因为"最新 500 条里恰好没有图片"
+// 而漏掉更早的图片（这正是内存过滤的老问题）。
+func (s *Store) ListFiltered(f Filter, limit int) ([]Entry, error) {
+	return s.listFiltered(f, limit, true)
+}
+
+// listFiltered 是各查询的共用实现：brief 决定是否加载 full_text。
+func (s *Store) listFiltered(f Filter, limit int, brief bool) ([]Entry, error) {
 	cols := selectColumns
 	if brief {
 		cols = selectColumnsBrief
 	}
-	like := "%" + escapeLike(q) + "%"
-	sqlQuery := cols + `
-		WHERE preview LIKE ? ESCAPE '\' OR full_text LIKE ? ESCAPE '\'
-		ORDER BY is_favorite DESC, copied_at DESC`
-	args := []any{like, like}
+	var where []string
+	var args []any
+	if f.Kind != "" {
+		where = append(where, "kind = ?")
+		args = append(args, string(f.Kind))
+	}
+	if f.FavoritesOnly {
+		where = append(where, "is_favorite = 1")
+	}
+	if q := strings.TrimSpace(f.Text); q != "" {
+		// 关键字同时匹配预览与全文；加括号以免与其他条件组合时优先级出错。
+		where = append(where, `(preview LIKE ? ESCAPE '\' OR full_text LIKE ? ESCAPE '\')`)
+		like := "%" + escapeLike(q) + "%"
+		args = append(args, like, like)
+	}
+
+	query := cols
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, " AND ")
+	}
+	query += ` ORDER BY is_favorite DESC, copied_at DESC`
 	if limit > 0 {
-		sqlQuery += ` LIMIT ?`
+		query += ` LIMIT ?`
 		args = append(args, limit)
 	}
-	return s.queryEntries(sqlQuery, args...)
+	return s.queryEntries(query, args...)
 }
 
 // Delete 删除单条历史，并同时清理其图片文件（若为图片条目）。
@@ -432,8 +447,11 @@ func scanEntry(row interface{ Scan(dest ...any) error }) (Entry, error) {
 	return e, nil
 }
 
-// hashBytes 计算内容的 sha256 十六进制摘要（去重键）。
-func hashBytes(b []byte) string {
+// HashBytes 计算内容的 sha256 十六进制摘要（去重键）。
+//
+// 导出供 watch 包复用：监听器需要在入库前算一遍哈希来判重，
+// 两处必须用同一套算法，否则去重语义会漂移。
+func HashBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
