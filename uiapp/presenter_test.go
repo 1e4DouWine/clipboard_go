@@ -85,9 +85,9 @@ func TestViewWithItems(t *testing.T) {
 	if !tt.HasText("2 items") {
 		t.Errorf("expected item count, texts %q", tt.Texts())
 	}
-	// 类型徽标。
-	if !tt.HasText("URL") {
-		t.Errorf("expected URL badge, texts %q", tt.Texts())
+	// 元信息：来源应用。
+	if !tt.HasText("Chrome · ") {
+		t.Errorf("expected source app in meta line, texts %q", tt.Texts())
 	}
 }
 
@@ -97,8 +97,16 @@ func TestViewFavoriteStar(t *testing.T) {
 		{ID: 1, Kind: store.KindText, Preview: "starred", IsFavorite: true, CopiedAt: 1700000000000},
 	}}
 	tt := ui.NewTester(h.presenter().View, 560, 520)
-	if !tt.HasText("★") {
+	if _, ok := tt.Find("Favorited"); !ok {
 		t.Errorf("expected favorite star, texts %q", tt.Texts())
+	}
+	// 未收藏条目不显示星标。
+	b := &harness{items: []store.Entry{
+		{ID: 1, Kind: store.KindText, Preview: "plain", CopiedAt: 1700000000000},
+	}}
+	tt2 := ui.NewTester(b.presenter().View, 560, 520)
+	if _, ok := tt2.Find("Favorited"); ok {
+		t.Error("unfavorited entry should not show a star")
 	}
 }
 
@@ -139,6 +147,14 @@ func TestViewSettingsModal(t *testing.T) {
 	}
 	if !tt2.HasText("English") || !tt2.HasText("中文") {
 		t.Errorf("expected language options, texts %q", tt2.Texts())
+	}
+
+	tt2.SetSize(360, 280)
+	for _, label := range []string{"Settings", "Language", "Theme", "Launch at login", "English", "中文", "Auto", "Light", "Dark", "Close"} {
+		el, ok := tt2.Find(label)
+		if !ok || el.X < 0 || el.Y < 0 || el.X+el.W > 360 || el.Y+el.H > 280 {
+			t.Errorf("minimum window clips setting %q: %+v", label, el)
+		}
 	}
 }
 
@@ -202,12 +218,31 @@ func TestFluentHeaderCompact(t *testing.T) {
 	}
 }
 
-// TestFluentShortcutSeparator 验证状态栏快捷键以 · 分隔（安静页脚）。
-func TestFluentShortcutSeparator(t *testing.T) {
+// TestShortcutKeycaps 验证状态栏以键帽 + 动作名展示快捷键，且全部在窗口内。
+func TestShortcutKeycaps(t *testing.T) {
 	h := &harness{}
 	tt := ui.NewTester(h.presenter().View, 560, 520)
-	if !tt.HasText("·") {
-		t.Errorf("expected shortcut help with · separators, texts %q", tt.Texts())
+	for _, hint := range shortcutHints {
+		key, ok := tt.Find(hint.key)
+		if !ok {
+			t.Fatalf("expected keycap %q, texts %q", hint.key, tt.Texts())
+		}
+		if key.X+key.W > 560 {
+			t.Errorf("keycap %q overflows window: %+v", hint.key, key)
+		}
+		if !tt.HasText(hint.action) {
+			t.Errorf("expected action %q, texts %q", hint.action, tt.Texts())
+		}
+	}
+
+	tt.SetSize(360, 280)
+	for _, hint := range shortcutHints {
+		for _, label := range []string{hint.key, hint.action} {
+			el, ok := tt.Find(label)
+			if !ok || el.X+el.W > 360 || el.Y+el.H > 280 {
+				t.Errorf("minimum window clips %q: %+v", label, el)
+			}
+		}
 	}
 }
 
