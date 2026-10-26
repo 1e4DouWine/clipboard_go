@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"runtime"
 
@@ -19,9 +20,7 @@ import (
 
 // main 组装应用：持久化 → 后台监听 → 全局快捷键 → 窗口，随后进入事件循环。
 //
-// 组装原则：app 只依赖接口（clipWriter/windowOps/paster/quitOps），
-// 生产实现全部在这里注入；任一组件初始化失败都按"降级不阻塞"处理——
-// 例如全局快捷键被占用时仅提示改键，应用本身照常可用。
+// 核心依赖初始化失败时退出；全局快捷键被占用等可恢复错误在界面提示。
 func main() {
 	// 应用名先行：影响 mygo.App.Path 系列目录名（日志/数据目录），
 	// 同时决定单实例锁的键——两者必须同源，否则会出现"锁的是 A、数据写在 B"。
@@ -76,22 +75,14 @@ func setupLogging() string {
 }
 
 // setup 在应用就绪后初始化各组件（主线程执行一次）。
-//
-// 失败即整体回滚：任何一步出错都会走同一条 cleanup 路径释放已初始化的
-// 资源（监听、快捷键、数据库），不留下半可用状态。
-func (a *app) setup() (err error) {
-	defer func() {
-		if err != nil {
-			a.cleanup()
-		}
-	}()
-
+func (a *app) setup() error {
 	// ── 1. 持久化层 ──────────────────────────────────────────────
 	st, err := a.openStore()
 	if err != nil {
 		return err
 	}
 	a.st = st
+	a.queryHistory = st.ListFiltered
 	a.clip = mygo.Clipboard // mygo.Clipboard 天然满足 clipWriter/watch.Clipboard
 	a.login = mygo.App      // mygo.App 天然满足 loginOps（开机自启）
 	a.quitter = mygo.App    // mygo.App 天然满足 quitOps（退出应用）
@@ -104,22 +95,16 @@ func (a *app) setup() (err error) {
 	// ── 1b. 主题：恢复外观偏好并立即应用 ─────────────────────────
 	// 必须在创建窗口之前应用，让第一个窗口直接以正确外观呈现，
 	// 避免"启动闪白再变黑"。theme.Mode 与 mygo.ThemeSource 取值一一对应。
-	theming, err := theme.New(st, theme.ApplierFunc(func(m theme.Mode) {
+	a.theming = theme.New(st, func(m theme.Mode) {
 		mygo.Theme.SetSource(mygo.ThemeSource(m))
-	}))
-	if err != nil {
-		return err
-	}
-	a.theming = theming
-	a.themeIdx = theming.Mode().Index() // 同步切换器显示
+	})
+	a.themeIdx = a.theming.Mode().Index() // 同步切换器显示
 
 	// ── 2. 窗口 ─────────────────────────────────────────────────
 	a.createWindow()
 
 	// ── 3. 后台监听 ──────────────────────────────────────────────
-	if err := a.startWatcher(); err != nil {
-		return err
-	}
+	a.startWatcher()
 
 	// ── 4. 全局快捷键 ────────────────────────────────────────────
 	a.registerHotkey()
@@ -138,14 +123,9 @@ func (a *app) setup() (err error) {
 func (a *app) openStore() (*store.Store, error) {
 	dataDir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
-		return nil, errors.New("定位用户数据目录失败: " + err.Error())
+		return nil, fmt.Errorf("定位用户数据目录失败: %w", err)
 	}
-	st, err := store.Open(dataDir, store.Options{})
-	if err != nil {
-		// 损坏的库已在 store 内部备份重建，仍失败属于磁盘级故障。
-		return nil, err
-	}
-	return st, nil
+	return store.Open(dataDir, store.Options{})
 }
 
 // createWindow 创建主窗口并接好关闭语义。
@@ -156,7 +136,7 @@ func (a *app) createWindow() {
 	hidden := mygo.App.WasOpenedAtLogin()
 	a.autoStart = mygo.App.OpenAtLogin()
 	a.searchDelay = defaultSearchDebounce
-	a.ui = a.newPresenter()
+	presenter := a.newPresenter()
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:     a.t("Clipboard History"), // 系统窗口标题随语言；SetName 保持产品标识
 		Width:     560,
@@ -165,7 +145,7 @@ func (a *app) createWindow() {
 		MinHeight: 280,
 		StateKey:  "main", // 记忆窗口位置/大小/最大化状态
 		Hidden:    hidden,
-		Content:   ui.View(a.ui.View),
+		Content:   ui.View(presenter.View),
 	})
 	// 关窗隐藏而非退出：保持后台捕获（与托盘常驻类应用一致）。
 	// 用户可用全局快捷键随时唤回；彻底退出走 Ctrl+Q。
@@ -177,18 +157,14 @@ func (a *app) createWindow() {
 // startWatcher 启动后台剪贴板监听。
 //
 // 监听在后台 goroutine 阻塞运行，ctx 取消即退出（见 cleanup）。
-func (a *app) startWatcher() error {
-	ctx, cancel := context.WithCancel(context.Background())
-	watcher, err := watch.New(watch.Options{
+func (a *app) startWatcher() {
+	watcher := watch.New(watch.Options{
 		Clipboard: mygo.Clipboard, // 天然满足 watch.Clipboard
 		Store:     a.st,
 		OnCapture: a.onCaptured, // 后台 goroutine → win.Update 投递主线程
 		OnError:   func(err error) { log.Printf("历史入库失败: %v", err) },
 	})
-	if err != nil {
-		cancel()
-		return err
-	}
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	a.watchCancel = cancel // 记下取消函数，供 cleanup 统一释放
 	a.watchDone = done
@@ -196,7 +172,6 @@ func (a *app) startWatcher() error {
 		defer close(done)
 		watcher.Run(ctx)
 	}()
-	return nil
 }
 
 // registerHotkey 注册全局快捷键。
@@ -204,12 +179,7 @@ func (a *app) startWatcher() error {
 // 失败不致命：被系统/其他程序占用时仅提示改键，应用内快捷键不受影响。
 // mygo.GlobalShortcut 天然满足 hotkey.Backend。
 func (a *app) registerHotkey() {
-	hotkeys, err := hotkey.New(mygo.GlobalShortcut)
-	if err != nil {
-		log.Printf("全局快捷键初始化失败: %v", err)
-		a.reportStatus("Failed to register global shortcut. Use another shortcut.")
-		return
-	}
+	hotkeys := hotkey.New(mygo.GlobalShortcut)
 	a.hotkeys = hotkeys
 	used, err := hotkey.RegisterWithSettings(hotkeys, a.st, hotkey.ActionToggleWindow, func() {
 		a.toggleWindow()
@@ -220,12 +190,12 @@ func (a *app) registerHotkey() {
 			// registered the safe default. Keep the working shortcut and surface
 			// a repairable configuration warning instead of reporting failure.
 			log.Printf("全局快捷键配置无效，已回退默认键 %s: %v", used, err)
-			a.reportStatus("Invalid saved shortcut; using default.")
+			a.status = a.t("Invalid saved shortcut; using default.")
 			return
 		}
 		// 冲突/配置错误均不致命：记录并提示改键，应用内快捷键不受影响。
 		log.Printf("全局快捷键注册失败（可在设置中改键）: %v", err)
-		a.reportStatus("Failed to register global shortcut. Use another shortcut.")
+		a.status = a.t("Failed to register global shortcut. Use another shortcut.")
 		return
 	}
 	log.Printf("全局快捷键已注册: %s", used)
@@ -248,7 +218,6 @@ func (a *app) registerQuitHooks() {
 
 // cleanup 释放已初始化的资源：停止监听、归还快捷键、关闭数据库。
 //
-// 初始化失败与正常退出共用这一条路径，避免各错误分支各写一遍清理逻辑。
 // 可重复调用（幂等）。
 func (a *app) cleanup() {
 	watchCancel, watchDone := a.watchCancel, a.watchDone
@@ -271,11 +240,4 @@ func (a *app) cleanup() {
 		}
 		a.st = nil
 	}
-}
-
-// reportStatus 在状态栏提示一条信息（经 win.Update 投递主线程）。
-func (a *app) reportStatus(msg string) {
-	a.win.Update(func() {
-		a.status = a.t(msg)
-	})
 }

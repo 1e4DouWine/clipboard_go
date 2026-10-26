@@ -349,6 +349,16 @@ func TestCorruptDBRecovery(t *testing.T) {
 	}
 }
 
+func TestIntegrityCheckPropagatesErrors(t *testing.T) {
+	s := newTestStore(t, Options{})
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkIntegrity(s.db); err == nil {
+		t.Fatal("数据库操作失败应返回错误，不能按损坏处理并重建")
+	}
+}
+
 // TestBriefQueries 验证 Brief 查询不加载全文，全文可按需 Get。
 // （内存优化回归测试：列表/搜索是 UI 高频路径，全文必须走懒加载。）
 func TestBriefQueries(t *testing.T) {
@@ -484,7 +494,7 @@ func TestListFilteredCombinesConditions(t *testing.T) {
 	}
 }
 
-// TestClosedStore 验证 Close 之后调用返回 ErrClosed，且 Close 幂等。
+// TestClosedStore 验证 Close 之后数据库拒绝继续操作，且 Close 幂等。
 func TestClosedStore(t *testing.T) {
 	s := newTestStore(t, Options{})
 	if err := s.Close(); err != nil {
@@ -493,7 +503,17 @@ func TestClosedStore(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("重复 Close 应幂等: %v", err)
 	}
-	if _, err := s.AddText("x", ""); !errors.Is(err, ErrClosed) {
-		t.Fatalf("关闭后写入期望 ErrClosed，实际: %v", err)
+	if _, err := s.AddText("x", ""); err == nil {
+		t.Fatalf("关闭后写入应失败，实际: %v", err)
+	}
+	if _, err := s.AddImage([]byte("closed-store-image"), ""); err == nil {
+		t.Fatal("关闭后图片写入应失败")
+	}
+	files, err := os.ReadDir(filepath.Join(s.DataDir(), imagesDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatal("关闭后不应写入孤儿图片文件")
 	}
 }

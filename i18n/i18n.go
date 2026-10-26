@@ -3,7 +3,6 @@
 // 约定：
 //   - 英文源串即 key；T 在中文下查 dict，其余情况原样返回英文（天然回退）。
 //   - 格式化文案用 Tpl，中英文共用同一套 %d/%s 参数顺序。
-//   - 技术码（URL/CODE/IMG/TXT 等类型徽章）不翻译。
 //
 // 语言状态不使用全局变量：Locale 是值类型，随应用状态流转，
 // 测试可并行、无需复位全局量。
@@ -95,7 +94,15 @@ var dict = map[string]string{
 
 	// 状态栏
 	"Launch at login": "开机自启",
-	"↑↓ Choose  ·  ↵ Paste  ·  Del Delete  ·  Ctrl+D Favorite  ·  Esc Close  ·  Ctrl+Q Quit": "↑↓ 选择  ·  ↵ 粘贴  ·  Del 删除  ·  Ctrl+D 收藏  ·  Esc 关闭  ·  Ctrl+Q 退出",
+	"Paste":           "粘贴",
+	"Favorite":        "收藏",
+	"Delete":          "删除",
+	"Quit":            "退出",
+
+	// 条目类型（提示 / 读屏）
+	"Link":      "链接",
+	"Image":     "图片",
+	"Favorited": "已收藏",
 
 	// 主题
 	"Auto":  "自动",
@@ -104,8 +111,9 @@ var dict = map[string]string{
 	"Theme": "主题",
 
 	// 设置页（"English" / "中文" 作为语言名各自保持原文，不进字典）
-	"Language": "语言",
-	"Close":    "关闭",
+	"Language":     "语言",
+	"Close":        "关闭",
+	"Clear search": "清空搜索",
 
 	// 状态提示
 	"Failed to load history. Check the log.":                      "加载历史失败，请查看日志",

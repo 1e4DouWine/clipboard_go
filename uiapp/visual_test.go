@@ -31,10 +31,11 @@ func TestDumpFluentVisuals(t *testing.T) {
 	}
 
 	cases := []struct {
-		name string
-		dark bool
-		lang i18n.Lang
-		h    *harness
+		name   string
+		dark   bool
+		lang   i18n.Lang
+		h      *harness
+		narrow bool
 	}{
 		{name: "light-list", dark: false, lang: i18n.LangEN, h: &harness{items: samples, chosen: 1}},
 		{name: "dark-list", dark: true, lang: i18n.LangEN, h: &harness{items: samples, chosen: 1}},
@@ -42,12 +43,18 @@ func TestDumpFluentVisuals(t *testing.T) {
 		{name: "light-filtered", dark: false, lang: i18n.LangEN, h: &harness{query: "zzz"}},
 		{name: "light-settings-en", dark: false, lang: i18n.LangEN, h: &harness{items: samples, settingsOpen: true, themeIdx: 1, langIdx: 0, autoStart: true}},
 		{name: "dark-settings-zh", dark: true, lang: i18n.LangZH, h: &harness{items: samples, settingsOpen: true, themeIdx: 2, langIdx: 1}},
+		{name: "light-settings-narrow-en", narrow: true, lang: i18n.LangEN, h: &harness{items: samples, settingsOpen: true, themeIdx: 1}},
+		{name: "light-settings-narrow-zh", narrow: true, lang: i18n.LangZH, h: &harness{items: samples, settingsOpen: true, themeIdx: 1, langIdx: 1}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.h.locale = i18n.New(tc.lang)
 			tt := ui.NewTester(tc.h.presenter().View, 560, 520)
+			if tc.narrow {
+				tt.SetSize(360, 280)
+				tt.SetScale(1.25)
+			}
 			tt.SetDark(tc.dark)
 			tt.Frame()
 			img := tt.Image()

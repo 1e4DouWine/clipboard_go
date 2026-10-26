@@ -152,7 +152,7 @@ type fakeQuitter struct {
 
 func (q *fakeQuitter) Quit() { q.quits++ }
 
-// fakeThemeApplier 记录主题应用序列（theme.Applier 的测试替身）。
+// fakeThemeApplier 记录主题应用序列（主题应用回调的测试替身）。
 type fakeThemeApplier struct {
 	applied []theme.Mode
 }
@@ -169,9 +169,8 @@ func (f *fakeThemeApplier) last() theme.Mode {
 
 // fakeLogin 记录开机自启状态；可注入设置失败。
 type fakeLogin struct {
-	open      bool // 当前自启状态（模拟系统侧）
-	openedNow bool // 本次是否由登录启动
-	failSet   bool // 注入 SetOpenAtLogin 失败
+	open    bool // 当前自启状态（模拟系统侧）
+	failSet bool // 注入 SetOpenAtLogin 失败
 }
 
 func (f *fakeLogin) SetOpenAtLogin(open bool) error {
@@ -181,8 +180,7 @@ func (f *fakeLogin) SetOpenAtLogin(open bool) error {
 	f.open = open
 	return nil
 }
-func (f *fakeLogin) OpenAtLogin() bool      { return f.open }
-func (f *fakeLogin) WasOpenedAtLogin() bool { return f.openedNow }
+func (f *fakeLogin) OpenAtLogin() bool { return f.open }
 
 // newTestApp 创建挂接真实临时 store 与 fake 依赖的 app。
 func newTestApp(t *testing.T) (*app, *fakeClip, *fakeWin, *fakePaster) {
@@ -197,7 +195,7 @@ func newTestApp(t *testing.T) (*app, *fakeClip, *fakeWin, *fakePaster) {
 	clip := &fakeClip{}
 	win := &fakeWin{log: log, deferUpdates: true, updates: make(chan struct{}, 1)}
 	paste := &fakePaster{log: log}
-	a := &app{st: st, clip: clip, win: win, paste: paste}
+	a := &app{st: st, clip: clip, win: win, paste: paste, quitter: &fakeQuitter{}, queryHistory: st.ListFiltered}
 	return a, clip, win, paste
 }
 
@@ -635,7 +633,7 @@ func TestQuitRequestsAppQuit(t *testing.T) {
 	q := &fakeQuitter{}
 	a.quitter = q
 
-	a.quit()
+	a.newPresenter().Actions.Quit()
 	if q.quits != 1 {
 		t.Fatalf("应请求退出 1 次，实际 %d", q.quits)
 	}
@@ -841,14 +839,11 @@ func TestToggleAutoStart(t *testing.T) {
 
 // ---- 主题切换 ----
 
-// TestSetThemeSwitchesAndNotifies 验证切换器动作与主题管理器联动。
-func TestSetThemeSwitchesAndNotifies(t *testing.T) {
+// TestSetThemeSwitchesAndPersists 验证切换器动作与主题管理器、存储联动。
+func TestSetThemeSwitchesAndPersists(t *testing.T) {
 	a, _, _, _ := newTestApp(t)
 	ap := &fakeThemeApplier{}
-	mgr, err := theme.New(a.st, ap)
-	if err != nil {
-		t.Fatalf("theme.New 失败: %v", err)
-	}
+	mgr := theme.New(a.st, ap.Apply)
 	a.theming = mgr
 
 	a.setTheme(2) // Dark
@@ -858,13 +853,15 @@ func TestSetThemeSwitchesAndNotifies(t *testing.T) {
 	if ap.last() != theme.ModeDark {
 		t.Fatalf("外观应立即应用 dark，实际 %q", ap.last())
 	}
+	if value, ok, err := a.st.GetSetting(theme.SettingsKey); err != nil || !ok || value != string(theme.ModeDark) {
+		t.Fatalf("主题偏好未保存: value=%q ok=%v err=%v", value, ok, err)
+	}
 
 	// 越界序号回退跟随系统（防御性）。
 	a.setTheme(99)
 	if mgr.Mode() != theme.ModeSystem {
 		t.Fatalf("越界应回退 system，实际 %q", mgr.Mode())
 	}
-
 }
 
 // TestSetLangSwitchesAndPersists 验证语言切换：a.locale 立即生效 + 写库。

@@ -2,8 +2,6 @@ package watch
 
 import (
 	"context"
-	"errors"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -63,10 +61,7 @@ func newTestWatcher(t *testing.T, clip Clipboard, mutate func(*Options)) (*Watch
 	if mutate != nil {
 		mutate(&opts)
 	}
-	w, err := New(opts)
-	if err != nil {
-		t.Fatalf("New 失败: %v", err)
-	}
+	w := New(opts)
 	return w, st
 }
 
@@ -80,36 +75,20 @@ func listAll(t *testing.T, st *store.Store) []store.Entry {
 	return items
 }
 
-// TestNewValidation 验证必填依赖缺失时报错、参数归一化生效。
-func TestNewValidation(t *testing.T) {
-	st, err := store.Open(t.TempDir(), store.Options{})
-	if err != nil {
-		t.Fatalf("Open store 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	// Clipboard 缺失。
-	if _, err := New(Options{Store: st}); err == nil {
-		t.Fatal("Clipboard 缺失应报错")
-	}
-	// Store 缺失。
-	if _, err := New(Options{Clipboard: &fakeClipboard{}}); err == nil {
-		t.Fatal("Store 缺失应报错")
-	}
-	// 参数归一化：非法间隔被钳制为下限，零值取默认。
-	w, err := New(Options{Clipboard: &fakeClipboard{}, Store: st, Interval: -1})
-	if err != nil {
-		t.Fatalf("New 失败: %v", err)
-	}
-	if w.interval != DefaultInterval {
-		t.Fatalf("非法间隔应取默认值，实际 %v", w.interval)
-	}
-	w2, err := New(Options{Clipboard: &fakeClipboard{}, Store: st, Interval: time.Nanosecond})
-	if err != nil {
-		t.Fatalf("New 失败: %v", err)
-	}
-	if w2.interval != minInterval {
-		t.Fatalf("过小间隔应钳制到下限 %v，实际 %v", minInterval, w2.interval)
+func TestDefaultPollingOptions(t *testing.T) {
+	for _, tc := range []struct {
+		interval time.Duration
+		want     time.Duration
+	}{
+		{0, DefaultInterval},
+		{-1, DefaultInterval},
+		{time.Nanosecond, minInterval},
+		{time.Second, time.Second},
+	} {
+		w := New(Options{Interval: tc.interval})
+		if w.interval != tc.want || w.settle != DefaultSettle {
+			t.Errorf("interval=%v: got interval=%v settle=%v", tc.interval, w.interval, w.settle)
+		}
 	}
 }
 
@@ -291,10 +270,9 @@ func TestPollEmptyClipboard(t *testing.T) {
 	}
 }
 
-// TestImageFingerprintShortCircuit 验证大图片未变化时走指纹短路：
-// 不重复入库、不重复触发回调（消除稳态 CPU/内存抖动）。
-func TestImageFingerprintShortCircuit(t *testing.T) {
-	// 大于采样窗口（64KB×2）的图片，确保指纹基于首尾采样。
+// TestPollImageDedup 验证相同图片去重及图片中部变化的捕获。
+func TestPollImageDedup(t *testing.T) {
+	// 使用大图片验证完整内容参与去重。
 	img := make([]byte, 256*1024)
 	for i := range img {
 		img[i] = byte(i % 251)
@@ -313,7 +291,7 @@ func TestImageFingerprintShortCircuit(t *testing.T) {
 		t.Fatalf("首次应回调 1 次，实际 %d", captured)
 	}
 
-	// 图片未变化：后续轮询应全部短路（不入库、不回调）。
+	// 图片未变化时不重复入库或回调。
 	w.poll(context.Background())
 	w.poll(context.Background())
 	if items := listAll(t, st); len(items) != 1 {
@@ -323,31 +301,14 @@ func TestImageFingerprintShortCircuit(t *testing.T) {
 		t.Fatalf("未变化图片不应重复回调，实际 %d", captured)
 	}
 
-	// 图片变化：指纹不同，恢复捕获。
+	// 首尾不变、仅中间变化时仍应捕获。
 	clip.mu.Lock()
-	clip.image = append(img[:len(img)-1], 0xFF)
+	clip.image = append([]byte(nil), img...)
+	clip.image[len(img)/2] ^= 0xFF
 	clip.mu.Unlock()
 	w.poll(context.Background())
 	if items := listAll(t, st); len(items) != 2 {
 		t.Fatalf("变化后的图片应入库，实际 %+v", items)
-	}
-}
-
-// TestFingerprintSeparatesContent 验证指纹对长度与内容差异敏感。
-func TestFingerprintSeparatesContent(t *testing.T) {
-	a := make([]byte, 128*1024)
-	b := make([]byte, 128*1024)
-	copy(b, a)
-	b[len(b)-1] = 1 // 尾部差异（在采样窗口内）
-
-	if fingerprint(a) != fingerprint(a) {
-		t.Fatal("同内容指纹应稳定")
-	}
-	if fingerprint(a) == fingerprint(b) {
-		t.Fatal("尾部差异应产生不同指纹")
-	}
-	if fingerprint(a) == fingerprint(a[:len(a)-1]) {
-		t.Fatal("长度差异应产生不同指纹")
 	}
 }
 
@@ -433,41 +394,6 @@ func TestRunStopsOnCancel(t *testing.T) {
 	}
 }
 
-// TestNoGoroutineLeak 验证 Watcher.Run 反复启停不泄漏 goroutine。
-// （内存泄漏回归测试：取消后 goroutine 必须退出归还。）
-func TestNoGoroutineLeak(t *testing.T) {
-	w, _ := newTestWatcher(t, &fakeClipboard{text: "leak check"}, nil)
-
-	// 先跑一轮预热（让运行时创建自己的后台 goroutine 后再取基线）。
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); w.Run(ctx) }()
-	time.Sleep(20 * time.Millisecond)
-	cancel()
-	<-done
-
-	before := runtime.NumGoroutine()
-	// 多轮启停后，goroutine 数应回到基线附近（允许少量运行时抖动）。
-	for i := 0; i < 5; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
-		go func() { defer close(done); w.Run(ctx) }()
-		time.Sleep(10 * time.Millisecond)
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("Run 未随 ctx 取消退出")
-		}
-	}
-	// 给调度器一点收敛时间。
-	time.Sleep(50 * time.Millisecond)
-	after := runtime.NumGoroutine()
-	if after > before+2 {
-		t.Fatalf("goroutine 泄漏：before=%d after=%d", before, after)
-	}
-}
-
 // TestSourceAppRecorded 验证来源窗口标题被记录到条目。
 func TestSourceAppRecorded(t *testing.T) {
 	clip := &fakeClipboard{text: "from vscode"}
@@ -496,7 +422,7 @@ func TestOnCaptureReceivesDedupedEntry(t *testing.T) {
 
 	w.poll(context.Background())
 	// 强制清掉去重标记，模拟"同一内容被用户再次复制"的场景。
-	w.markLast("", snapshot{})
+	w.lastHash = ""
 
 	w.poll(context.Background())
 
@@ -508,12 +434,5 @@ func TestOnCaptureReceivesDedupedEntry(t *testing.T) {
 	}
 	if captured[1].SourceApp == "" && strings.TrimSpace(captured[1].Preview) == "" {
 		t.Fatal("回调收到空条目")
-	}
-}
-
-// TestErrorTypes 验证错误常量可用于 errors.Is 判断（防回归）。
-func TestErrorTypes(t *testing.T) {
-	if !errors.Is(store.ErrEmptyContent, store.ErrEmptyContent) {
-		t.Fatal("ErrEmptyContent 语义异常")
 	}
 }

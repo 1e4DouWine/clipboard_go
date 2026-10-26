@@ -44,16 +44,7 @@ func (h *harness) presenter() *Presenter {
 		SearchChanged: func() { h.events = append(h.events, "search") },
 		FilterChanged: func() { h.events = append(h.events, "filter") },
 		MoveChosen: func(delta int) {
-			h.chosen += delta
-			if h.chosen < 0 {
-				h.chosen = 0
-			}
-			if h.chosen >= len(h.items) {
-				h.chosen = len(h.items) - 1
-			}
-			if h.chosen < 0 {
-				h.chosen = 0
-			}
+			h.chosen = max(0, min(h.chosen+delta, len(h.items)-1))
 			h.events = append(h.events, "move")
 		},
 		Activate:        func(i int) { h.events = append(h.events, "activate") },

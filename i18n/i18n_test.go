@@ -68,13 +68,6 @@ func TestLoadSaveLang(t *testing.T) {
 	}
 	s.fail = false
 
-	// nil 存储安全
-	if got := Load(nil); got != LangEN {
-		t.Errorf("Load(nil) = %v, want LangEN", got)
-	}
-	if err := Save(nil, LangZH); err == nil {
-		t.Error("Save(nil) 应返回错误")
-	}
 }
 
 func TestTDefaultEnglish(t *testing.T) {

@@ -29,9 +29,6 @@ func SettingKey(action string) string { return settingsKeyPrefix + action }
 // LoadAccelerator 读取用户自定义快捷键（原始存储值）。
 // 第二个返回值表示是否有自定义值；空字符串视为"未自定义"。
 func LoadAccelerator(s *store.Store, action string) (string, bool, error) {
-	if s == nil {
-		return "", false, fmt.Errorf("hotkey: store 不能为空")
-	}
 	v, ok, err := s.GetSetting(SettingKey(action))
 	if err != nil {
 		return "", false, fmt.Errorf("hotkey: 读取 %q 快捷键配置失败: %w", action, err)
@@ -49,12 +46,6 @@ func LoadAccelerator(s *store.Store, action string) (string, bool, error) {
 //   - acc 语法非法 → 拒绝写入，返回 ErrInvalidAccelerator，
 //     保证配置库里永远不会出现无法解析的值。
 func SaveAccelerator(s *store.Store, action, acc string) error {
-	if s == nil {
-		return fmt.Errorf("hotkey: store 不能为空")
-	}
-	if strings.TrimSpace(action) == "" {
-		return fmt.Errorf("hotkey: action 不能为空")
-	}
 	value := ""
 	if strings.TrimSpace(acc) != "" {
 		canon, err := Canonical(acc) // 只做语法校验；改键入口已做过安全校验
@@ -76,9 +67,6 @@ func SaveAccelerator(s *store.Store, action, acc string) error {
 // 回退默认键并返回包装 ErrInvalidAccelerator 的错误——
 // 返回的快捷键始终可用，调用方可凭 errors.Is 决定是否提示用户修复配置。
 func EffectiveAccelerator(s *store.Store, action string) (string, error) {
-	if s == nil {
-		return "", fmt.Errorf("hotkey: store 不能为空")
-	}
 	v, ok, err := LoadAccelerator(s, action)
 	if err != nil {
 		return "", err
@@ -112,9 +100,6 @@ func EffectiveAccelerator(s *store.Store, action string) (string, error) {
 //   - 注册冲突（ErrConflict）原样返回，不影响其他动作的注册，
 //     由 UI 层提示用户改键（应用内快捷键不受影响）。
 func RegisterWithSettings(m *Manager, s *store.Store, action string, fn func()) (string, error) {
-	if m == nil {
-		return "", fmt.Errorf("hotkey: manager 不能为空")
-	}
 	acc, err := EffectiveAccelerator(s, action)
 	if err != nil && !errors.Is(err, ErrInvalidAccelerator) {
 		return "", err // 无法确定生效键，放弃注册
@@ -128,11 +113,8 @@ func RegisterWithSettings(m *Manager, s *store.Store, action string, fn func()) 
 // Change 更换 action 的快捷键并持久化，保证"配置 == 实际生效键"。
 //
 // 事务语义：注册与保存都成功才算成功；
-// 保存失败时回滚注册（恢复原快捷键或注销），避免配置与实际不一致。
+// 保存失败时恢复原快捷键，回滚失败一并返回。
 func Change(m *Manager, s *store.Store, action, acc string) error {
-	if m == nil || s == nil {
-		return fmt.Errorf("hotkey: manager/store 不能为空")
-	}
 	canon, err := normalize(acc)
 	if err != nil {
 		return err // 先整体校验，失败不产生任何副作用
@@ -143,19 +125,14 @@ func Change(m *Manager, s *store.Store, action, acc string) error {
 	if fn == nil {
 		return fmt.Errorf("%w: %q", ErrUnknownAction, action)
 	}
-	old, hadOld := m.Accelerator(action)
+	old, _ := m.Accelerator(action)
 
 	if err := m.registerCanonical(action, canon, fn); err != nil {
 		return err // 注册失败时 Register 内部已保持原绑定不动
 	}
 	if err := SaveAccelerator(s, action, acc); err != nil {
 		// 持久化失败：回滚注册，保持配置与实际一致。
-		if hadOld {
-			_ = m.registerCanonical(action, old, fn) // 回滚失败概率极低（旧键此前一直可用）
-		} else {
-			m.unregisterCanonical(action)
-		}
-		return err
+		return errors.Join(err, m.registerCanonical(action, old, fn))
 	}
 	return nil
 }

@@ -42,8 +42,10 @@ func (s *Store) AddImage(data []byte, sourceApp string) (Entry, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return Entry{}, ErrClosed
+
+	// 元数据存储不可用时不写文件，避免关闭后留下孤儿图片。
+	if err := s.db.Ping(); err != nil {
+		return Entry{}, fmt.Errorf("store: 写入图片历史失败: %w", err)
 	}
 
 	// 先落盘（幂等：同名文件已存在即跳过），再写元数据，
@@ -76,15 +78,11 @@ func (s *Store) AddImage(data []byte, sourceApp string) (Entry, error) {
 // ImageAbsPath 把条目中的图片相对路径解析为绝对路径。
 // 非图片条目（ImagePath 为空）返回空串，调用方据此判断是否需要加载图片。
 func (s *Store) ImageAbsPath(relPath string) string {
-	if relPath == "" {
-		return ""
-	}
 	// 防御路径穿越：即使数据库被外部篡改，也不会读写数据目录之外的文件。
-	clean := filepath.Clean(filepath.FromSlash(relPath))
-	if filepath.IsAbs(clean) || clean == ".." || len(clean) >= 2 && clean[:2] == ".." {
+	if !filepath.IsLocal(relPath) {
 		return ""
 	}
-	return filepath.Join(s.dataDir, clean)
+	return filepath.Join(s.dataDir, filepath.FromSlash(relPath))
 }
 
 // ReadImage 读取图片条目的二进制内容（快速粘贴/回写剪贴板时使用）。
@@ -107,10 +105,7 @@ func (s *Store) ReadImage(e Entry) ([]byte, error) {
 // writeImageFileLocked 以"临时文件 + 原子重命名"写入图片，避免半成品文件。
 // 目标已存在（同内容重复复制）时直接跳过，减少磁盘写入。
 func (s *Store) writeImageFileLocked(relPath string, data []byte) error {
-	abs := s.ImageAbsPath(relPath)
-	if abs == "" {
-		return errors.New("store: 图片路径非法")
-	}
+	abs := filepath.Join(s.dataDir, filepath.FromSlash(relPath))
 	// 幂等短路：同哈希文件必然内容一致，无需重写。
 	if _, err := os.Stat(abs); err == nil {
 		return nil

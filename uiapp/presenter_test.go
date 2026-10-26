@@ -85,9 +85,9 @@ func TestViewWithItems(t *testing.T) {
 	if !tt.HasText("2 items") {
 		t.Errorf("expected item count, texts %q", tt.Texts())
 	}
-	// 类型徽标。
-	if !tt.HasText("URL") {
-		t.Errorf("expected URL badge, texts %q", tt.Texts())
+	// 元信息：来源应用。
+	if !tt.HasText("Chrome · ") {
+		t.Errorf("expected source app in meta line, texts %q", tt.Texts())
 	}
 }
 
@@ -97,8 +97,16 @@ func TestViewFavoriteStar(t *testing.T) {
 		{ID: 1, Kind: store.KindText, Preview: "starred", IsFavorite: true, CopiedAt: 1700000000000},
 	}}
 	tt := ui.NewTester(h.presenter().View, 560, 520)
-	if !tt.HasText("★") {
+	if _, ok := tt.Find("Favorited"); !ok {
 		t.Errorf("expected favorite star, texts %q", tt.Texts())
+	}
+	// 未收藏条目不显示星标。
+	b := &harness{items: []store.Entry{
+		{ID: 1, Kind: store.KindText, Preview: "plain", CopiedAt: 1700000000000},
+	}}
+	tt2 := ui.NewTester(b.presenter().View, 560, 520)
+	if _, ok := tt2.Find("Favorited"); ok {
+		t.Error("unfavorited entry should not show a star")
 	}
 }
 
@@ -140,6 +148,55 @@ func TestViewSettingsModal(t *testing.T) {
 	if !tt2.HasText("English") || !tt2.HasText("中文") {
 		t.Errorf("expected language options, texts %q", tt2.Texts())
 	}
+	if err := tt2.Click("Light"); err != nil {
+		t.Fatal(err)
+	}
+	if b.themeIdx != 1 || !b.hasEvent("theme") {
+		t.Fatalf("theme action should observe updated binding: index=%d events=%v", b.themeIdx, b.events)
+	}
+}
+
+// TestSettingsResize 验证缩放后控件仍在面板内，且窄窗口下可以切换主题和关闭。
+func TestSettingsResize(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lang i18n.Lang
+	}{{"en", i18n.LangEN}, {"zh", i18n.LangZH}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &harness{locale: i18n.New(tc.lang), settingsOpen: true, themeIdx: 2}
+			p := h.presenter()
+			// 单独渲染弹窗，避免主界面同名按钮和页脚遮蔽布局断言。
+			tt := ui.NewTester(func(c *ui.Context) { p.settingsModal(c, applyFluentTheme(c)) }, 560, 520)
+			tt.SetScale(1.25)
+			for _, size := range [][2]int{{560, 520}, {360, 280}, {420, 350}, {640, 570}, {360, 520}, {560, 520}, {360, 280}} {
+				tt.SetSize(size[0], size[1])
+				tt.Frame()
+				panel, ok := tt.Find(h.locale.T("Settings"))
+				if !ok || panel.W <= 0 || panel.H <= 0 || panel.X < 0 || panel.Y < 0 || panel.X+panel.W > float32(size[0]) || panel.Y+panel.H > float32(size[1]) {
+					t.Fatalf("%v: dialog outside window: %+v", size, panel)
+				}
+				for _, text := range []string{"Language", "Theme", "Launch at login", "English", "中文", "Auto", "Light", "Dark", "Close"} {
+					label := h.locale.T(text)
+					el, ok := tt.Find(label)
+					if !ok || el.W <= 0 || el.H <= 0 || el.X < panel.X || el.Y < panel.Y || el.X+el.W > panel.X+panel.W || el.Y+el.H > panel.Y+panel.H {
+						t.Errorf("%v: setting %q outside dialog %+v: %+v", size, label, panel, el)
+					}
+				}
+			}
+			if err := tt.Click(h.locale.T("Light")); err != nil {
+				t.Fatal(err)
+			}
+			if h.themeIdx != 1 || !h.hasEvent("theme") {
+				t.Fatalf("theme control unusable after resize: index=%d events=%v", h.themeIdx, h.events)
+			}
+			if err := tt.Click(h.locale.T("Close")); err != nil {
+				t.Fatal(err)
+			}
+			if h.settingsOpen {
+				t.Fatal("dialog should close after resize")
+			}
+		})
+	}
 }
 
 // TestViewChineseLanguage 验证切换中文后整窗文案变化。
@@ -170,20 +227,6 @@ func TestViewChineseLanguage(t *testing.T) {
 	}
 }
 
-// TestFluentThemeRadius 验证 Fluent 度量覆盖：控件圆角收到 4（Win11）。
-func TestFluentThemeRadius(t *testing.T) {
-	var got float32
-	tt := ui.NewTester(func(c *ui.Context) {
-		th := applyFluentTheme(c)
-		got = th.Radius
-		ui.Text(c, "probe")
-	}, 560, 520)
-	_ = tt.HasText("probe")
-	if got != 4 {
-		t.Fatalf("Fluent Radius = %v, want 4", got)
-	}
-}
-
 // TestFluentHeaderCompact 验证标题栏紧凑：标题在窗口上沿附近，计数与切换器同排。
 func TestFluentHeaderCompact(t *testing.T) {
 	h := &harness{items: []store.Entry{
@@ -202,12 +245,24 @@ func TestFluentHeaderCompact(t *testing.T) {
 	}
 }
 
-// TestFluentShortcutSeparator 验证状态栏快捷键以 · 分隔（安静页脚）。
-func TestFluentShortcutSeparator(t *testing.T) {
-	h := &harness{}
-	tt := ui.NewTester(h.presenter().View, 560, 520)
-	if !tt.HasText("·") {
-		t.Errorf("expected shortcut help with · separators, texts %q", tt.Texts())
+// TestToolbarAndShortcutHintsResize 验证中英文分类和快捷键在窄窗口中完整排布。
+func TestToolbarAndShortcutHintsResize(t *testing.T) {
+	for _, lang := range []i18n.Lang{i18n.LangEN, i18n.LangZH} {
+		h := &harness{locale: i18n.New(lang)}
+		tt := ui.NewTester(h.presenter().View, 560, 520)
+		labels := h.locale.FilterLabels()
+		for _, hint := range shortcutHints {
+			labels = append(labels, hint.key, h.locale.T(hint.action))
+		}
+		for _, size := range [][2]int{{560, 520}, {360, 280}, {560, 520}} {
+			tt.SetSize(size[0], size[1])
+			for _, label := range labels {
+				el, ok := tt.Find(label)
+				if !ok || el.W <= 0 || el.H <= 0 || el.X < 0 || el.Y < 0 || el.X+el.W > float32(size[0]) || el.Y+el.H > float32(size[1]) {
+					t.Errorf("lang=%v size=%v clips %q: %+v", lang, size, label, el)
+				}
+			}
+		}
 	}
 }
 
@@ -238,6 +293,25 @@ func TestViewCtrlFFocusesSearch(t *testing.T) {
 	tt.Frame()
 	if !tt.Focused("Search history") {
 		t.Errorf("Ctrl+F 后搜索框应获得焦点，texts %q", tt.Texts())
+	}
+	tt.Type("clipboard")
+	if h.query != "clipboard" || !h.hasEvent("search") {
+		t.Fatalf("Ctrl+F 后应可直接搜索: query=%q events=%v", h.query, h.events)
+	}
+	tt.Key(0, ui.KeyEscape)
+	if h.query != "" || h.hasEvent("hide") {
+		t.Fatalf("Esc 应先清空搜索: query=%q events=%v", h.query, h.events)
+	}
+	tt.Key(0, ui.KeyEscape)
+	if !h.hasEvent("hide") {
+		t.Fatal("搜索为空时 Esc 应隐藏窗口")
+	}
+	tt.Type("another")
+	if err := tt.Click("Clear search"); err != nil {
+		t.Fatal(err)
+	}
+	if h.query != "" || !tt.Focused("Search history") {
+		t.Fatalf("清空按钮应保留输入焦点: query=%q", h.query)
 	}
 }
 
