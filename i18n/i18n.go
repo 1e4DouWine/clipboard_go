@@ -111,8 +111,9 @@ var dict = map[string]string{
 	"Theme": "主题",
 
 	// 设置页（"English" / "中文" 作为语言名各自保持原文，不进字典）
-	"Language": "语言",
-	"Close":    "关闭",
+	"Language":     "语言",
+	"Close":        "关闭",
+	"Clear search": "清空搜索",
 
 	// 状态提示
 	"Failed to load history. Check the log.":                      "加载历史失败，请查看日志",

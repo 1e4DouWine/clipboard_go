@@ -16,7 +16,8 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // 注册纯 Go SQLite 驱动（无需 CGO，便于交叉编译与无 C 环境构建）
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const (
@@ -89,12 +90,7 @@ func Open(dataDir string, opts Options) (*Store, error) {
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return nil // 边界：重复 Close 不报错
-	}
-	err := s.db.Close()
-	s.db = nil // 置空后其他方法会返回 ErrClosed，避免操作已关闭连接
-	return err
+	return s.db.Close()
 }
 
 // openDB 打开数据库并应用运行期 PRAGMA。
@@ -110,8 +106,6 @@ func openDB(dbPath string) (*sql.DB, error) {
 	// SQLite 是单写者模型：限制为单连接可彻底避免并发写导致的 "database is locked"，
 	// 对剪贴板这种低频写入场景没有性能损失。
 	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0) // 连接长期复用，避免反复打开/关闭文件
 	return db, nil
 }
 
@@ -119,10 +113,16 @@ func openDB(dbPath string) (*sql.DB, error) {
 func checkIntegrity(db *sql.DB) (bool, error) {
 	var result string
 	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
-		// 扫描失败说明文件根本不是合法 SQLite 文件（例如被其他程序写坏）。
-		return false, nil //nolint:nilerr // 该情况按"损坏"处理，走备份重建流程
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) {
+			switch sqliteErr.Code() & 0xff {
+			case sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB:
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("store: 检查数据库完整性失败: %w", err)
 	}
-	return strings.EqualFold(strings.TrimSpace(result), "ok"), nil
+	return result == "ok", nil
 }
 
 // quarantineDB 将损坏的数据库（及其 WAL/SHM 辅助文件）移出场外，保留现场供日后排查。

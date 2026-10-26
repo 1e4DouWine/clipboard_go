@@ -28,7 +28,7 @@ const (
 func (p *Presenter) listSection(c *ui.Context, t *ui.Theme) {
 	// 快照只取一次：本帧的条目与选中项对所有行共享，
 	// 避免每行都回调一次 Snapshot（列表可达数百行）。
-	state := p.state()
+	state := p.Snapshot()
 	items, sel := state.Items, state.Chosen
 	// 稳定行标识，刷新不丢滚动位置。
 	p.list.Key = func(i int) any { return items[i].ID }
@@ -78,7 +78,7 @@ func (p *Presenter) row(c *ui.Context, i int, e store.Entry, chosen, interactive
 			// OnClick 在构造与输入处理后执行（mygo 约定），可安全改集合。
 			if interactive {
 				card.OnClick(func() {
-					p.activate(i) // 点击条目 = 立即粘贴
+					p.Actions.Activate(i) // 点击条目 = 立即粘贴
 				})
 			}
 			card.Children(func() {

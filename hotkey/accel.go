@@ -170,10 +170,6 @@ func parseAcc(s, goos string) (parsed, error) {
 		}
 		out.key = key
 	}
-	if out.key == "" {
-		// 防御：正常解析流程必然设置 key，此分支兜底非法输入。
-		return out, fmt.Errorf("%w: %q 缺少按键", ErrInvalidAccelerator, s)
-	}
 	return out, nil
 }
 
@@ -198,14 +194,8 @@ func keyNeedsModifier(key string) bool {
 // Validate 校验快捷键：语法 + 全局安全策略。
 // 语法非法返回 ErrInvalidAccelerator；违反安全策略返回 ErrUnsafeAccelerator。
 func Validate(acc string) error {
-	p, err := parseAcc(acc, runtime.GOOS)
-	if err != nil {
-		return err
-	}
-	if keyNeedsModifier(p.key) && !p.hasPrimaryMod() {
-		return fmt.Errorf("%w: %q 会劫持日常输入，必须携带 Ctrl/Alt/Super 修饰键", ErrUnsafeAccelerator, acc)
-	}
-	return nil
+	_, err := normalize(acc)
+	return err
 }
 
 // Canonical 返回快捷键的规范形式（如 "ctrl+shift+v" → "Ctrl+Shift+V"），
@@ -221,8 +211,12 @@ func Canonical(acc string) (string, error) {
 
 // normalize 是 Register 内部使用的组合校验：安全策略 + 规范化。
 func normalize(acc string) (string, error) {
-	if err := Validate(acc); err != nil {
+	p, err := parseAcc(acc, runtime.GOOS)
+	if err != nil {
 		return "", err
 	}
-	return Canonical(acc)
+	if keyNeedsModifier(p.key) && !p.hasPrimaryMod() {
+		return "", fmt.Errorf("%w: %q 会劫持日常输入，必须携带 Ctrl/Alt/Super 修饰键", ErrUnsafeAccelerator, acc)
+	}
+	return p.canon(), nil
 }

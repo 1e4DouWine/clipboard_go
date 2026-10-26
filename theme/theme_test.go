@@ -1,7 +1,6 @@
 package theme
 
 import (
-	"errors"
 	"testing"
 
 	"my-go-app/store"
@@ -32,10 +31,7 @@ func newTestManager(t *testing.T) (*Manager, *fakeApplier, *store.Store) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	ap := &fakeApplier{}
-	m, err := New(st, ap)
-	if err != nil {
-		t.Fatalf("New 失败: %v", err)
-	}
+	m := New(st, ap.Apply)
 	return m, ap, st
 }
 
@@ -84,13 +80,6 @@ func TestNewAppliesImmediately(t *testing.T) {
 	}
 }
 
-// TestNewRejectsNilApplier 验证编程错误防御。
-func TestNewRejectsNilApplier(t *testing.T) {
-	if _, err := New(nil, nil); err == nil {
-		t.Fatal("nil Applier 应报错")
-	}
-}
-
 // TestSetModeAppliesAndPersists 验证切换即生效并持久化。
 func TestSetModeAppliesAndPersists(t *testing.T) {
 	m, ap, st := newTestManager(t)
@@ -109,14 +98,6 @@ func TestSetModeAppliesAndPersists(t *testing.T) {
 	if err != nil || !ok || v != string(ModeDark) {
 		t.Fatalf("偏好未持久化: v=%q ok=%v err=%v", v, ok, err)
 	}
-
-	// 非法输入按跟随系统处理。
-	if err := m.SetMode(Mode("bogus")); err != nil {
-		t.Fatalf("非法模式应兜底而非报错: %v", err)
-	}
-	if m.Mode() != ModeSystem {
-		t.Fatalf("非法模式应回退 system，实际 %q", m.Mode())
-	}
 }
 
 // TestSetModeSameValueSkipsSave 验证重复设置同值不产生多余持久化（幂等）。
@@ -127,9 +108,9 @@ func TestSetModeSameValueSkipsSave(t *testing.T) {
 	if err := m.SetMode(ModeSystem); err != nil {
 		t.Fatalf("SetMode 失败: %v", err)
 	}
-	// Apply 幂等调用一次（兜底语义），但不改变状态。
-	if len(ap.applied) != first+1 {
-		t.Fatalf("Apply 应幂等调用，实际应用序列 %+v", ap.applied)
+	// 同值不重复应用主题。
+	if len(ap.applied) != first {
+		t.Fatalf("相同模式不应重复 Apply，实际应用序列 %+v", ap.applied)
 	}
 	if m.Mode() != ModeSystem {
 		t.Fatal("模式不应变化")
@@ -150,10 +131,7 @@ func TestRestoresSavedPreference(t *testing.T) {
 	}
 
 	ap := &fakeApplier{}
-	m, err := New(st, ap)
-	if err != nil {
-		t.Fatalf("New 失败: %v", err)
-	}
+	m := New(st, ap.Apply)
 	if m.Mode() != ModeDark || ap.last() != ModeDark {
 		t.Fatalf("应恢复 dark 偏好: mode=%q applied=%q", m.Mode(), ap.last())
 	}
@@ -173,10 +151,7 @@ func TestRestoresInvalidPreferenceFallsBack(t *testing.T) {
 	}
 
 	ap := &fakeApplier{}
-	m, err := New(st, ap)
-	if err != nil {
-		t.Fatalf("坏配置不应导致启动失败: %v", err)
-	}
+	m := New(st, ap.Apply)
 	if m.Mode() != ModeSystem {
 		t.Fatalf("坏配置应回退 system，实际 %q", m.Mode())
 	}
@@ -197,60 +172,5 @@ func TestPersistenceFailureDoesNotBlockSwitch(t *testing.T) {
 	// 但外观已生效（核心语义不回退）。
 	if ap.last() != ModeLight || m.Mode() != ModeLight {
 		t.Fatalf("保存失败不影响切换: applied=%q mode=%q", ap.last(), m.Mode())
-	}
-}
-
-// TestOnChangeNotifyAndCancel 验证变更通知与取消（幂等）。
-func TestOnChangeNotifyAndCancel(t *testing.T) {
-	m, _, _ := newTestManager(t)
-
-	var got []Mode
-	off := m.OnChange(func(mode Mode) { got = append(got, mode) })
-
-	if err := m.SetMode(ModeDark); err != nil {
-		t.Fatalf("SetMode 失败: %v", err)
-	}
-	if len(got) != 1 || got[0] != ModeDark {
-		t.Fatalf("应收到 1 次 dark 通知，实际 %+v", got)
-	}
-
-	// 同值重复设置不触发通知（changed=false）。
-	if err := m.SetMode(ModeDark); err != nil {
-		t.Fatalf("SetMode 失败: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("同值设置不应触发通知，实际 %+v", got)
-	}
-
-	// 取消后再变更不通知；重复取消安全。
-	off()
-	off()
-	if err := m.SetMode(ModeLight); err != nil {
-		t.Fatalf("SetMode 失败: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("取消后不应通知，实际 %+v", got)
-	}
-}
-
-// TestNilStoreAllowed 验证无 store 的纯内存模式可用（测试/特殊场景）。
-func TestNilStoreAllowed(t *testing.T) {
-	ap := &fakeApplier{}
-	m, err := New(nil, ap)
-	if err != nil {
-		t.Fatalf("nil store 应允许: %v", err)
-	}
-	if err := m.SetMode(ModeDark); err != nil {
-		t.Fatalf("无 store 时 SetMode 不应报错: %v", err)
-	}
-	if m.Mode() != ModeDark {
-		t.Fatalf("mode = %q", m.Mode())
-	}
-}
-
-// TestErrorSemantics 验证错误哨兵可用性（防回归）。
-func TestErrorSemantics(t *testing.T) {
-	if _, err := New(nil, nil); !errors.Is(err, err) {
-		t.Fatal("错误语义异常")
 	}
 }

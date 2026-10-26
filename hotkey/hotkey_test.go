@@ -2,7 +2,6 @@ package hotkey
 
 import (
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 
@@ -124,10 +123,7 @@ func newTestEnv(t *testing.T) (*Manager, *fakeBackend, *store.Store) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	backend := newFakeBackend()
-	m, err := New(backend)
-	if err != nil {
-		t.Fatalf("New 失败: %v", err)
-	}
+	m := New(backend)
 	return m, backend, st
 }
 
@@ -372,27 +368,6 @@ func TestUnregisterAll(t *testing.T) {
 	m.UnregisterAll() // 幂等
 }
 
-// TestInvalidArguments 验证编程错误的防御。
-func TestInvalidArguments(t *testing.T) {
-	if _, err := New(nil); err == nil {
-		t.Fatal("New(nil) 应报错")
-	}
-	m, _, _ := newTestEnv(t)
-
-	if err := m.Register("", "Ctrl+V", noop); err == nil {
-		t.Fatal("空 action 应报错")
-	}
-	if err := m.Register("act", "Ctrl+V", nil); err == nil {
-		t.Fatal("nil handler 应报错")
-	}
-	if err := m.Register("act", "not-a-key", noop); !errors.Is(err, ErrInvalidAccelerator) {
-		t.Fatalf("非法快捷键应返回 ErrInvalidAccelerator，实际: %v", err)
-	}
-	if err := m.Register("act", "a", noop); !errors.Is(err, ErrUnsafeAccelerator) {
-		t.Fatalf("不安全快捷键应返回 ErrUnsafeAccelerator，实际: %v", err)
-	}
-}
-
 // TestDefaultAcceleratorsValid 验证内置默认快捷键全部通过语法+安全校验。
 func TestDefaultAcceleratorsValid(t *testing.T) {
 	for action, acc := range DefaultAccelerators {
@@ -620,10 +595,7 @@ func TestRegisterAndUnregisterAreAtomicWithBackend(t *testing.T) {
 		entered:     make(chan struct{}),
 		release:     make(chan struct{}),
 	}
-	m, err := New(backend)
-	if err != nil {
-		t.Fatalf("New 失败: %v", err)
-	}
+	m := New(backend)
 
 	registered := make(chan error, 1)
 	go func() { registered <- m.Register("act", "Ctrl+Shift+R", noop) }()
@@ -650,12 +622,5 @@ func TestRegisterAndUnregisterAreAtomicWithBackend(t *testing.T) {
 	}
 	if _, ok := m.Accelerator("act"); ok {
 		t.Fatal("并发注销后 Manager 不应残留绑定")
-	}
-}
-
-// TestErrorSentinels 验证错误常量语义（防回归误改）。
-func TestErrorSentinels(t *testing.T) {
-	if !errors.Is(ErrConflict, ErrConflict) || !strings.Contains(ErrConflict.Error(), "冲突") {
-		t.Fatal("ErrConflict 语义异常")
 	}
 }

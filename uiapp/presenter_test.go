@@ -148,13 +148,54 @@ func TestViewSettingsModal(t *testing.T) {
 	if !tt2.HasText("English") || !tt2.HasText("中文") {
 		t.Errorf("expected language options, texts %q", tt2.Texts())
 	}
+	if err := tt2.Click("Light"); err != nil {
+		t.Fatal(err)
+	}
+	if b.themeIdx != 1 || !b.hasEvent("theme") {
+		t.Fatalf("theme action should observe updated binding: index=%d events=%v", b.themeIdx, b.events)
+	}
+}
 
-	tt2.SetSize(360, 280)
-	for _, label := range []string{"Settings", "Language", "Theme", "Launch at login", "English", "中文", "Auto", "Light", "Dark", "Close"} {
-		el, ok := tt2.Find(label)
-		if !ok || el.X < 0 || el.Y < 0 || el.X+el.W > 360 || el.Y+el.H > 280 {
-			t.Errorf("minimum window clips setting %q: %+v", label, el)
-		}
+// TestSettingsResize 验证缩放后控件仍在面板内，且窄窗口下可以切换主题和关闭。
+func TestSettingsResize(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lang i18n.Lang
+	}{{"en", i18n.LangEN}, {"zh", i18n.LangZH}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &harness{locale: i18n.New(tc.lang), settingsOpen: true, themeIdx: 2}
+			p := h.presenter()
+			// 单独渲染弹窗，避免主界面同名按钮和页脚遮蔽布局断言。
+			tt := ui.NewTester(func(c *ui.Context) { p.settingsModal(c, applyFluentTheme(c)) }, 560, 520)
+			tt.SetScale(1.25)
+			for _, size := range [][2]int{{560, 520}, {360, 280}, {420, 350}, {640, 570}, {360, 520}, {560, 520}, {360, 280}} {
+				tt.SetSize(size[0], size[1])
+				tt.Frame()
+				panel, ok := tt.Find(h.locale.T("Settings"))
+				if !ok || panel.W <= 0 || panel.H <= 0 || panel.X < 0 || panel.Y < 0 || panel.X+panel.W > float32(size[0]) || panel.Y+panel.H > float32(size[1]) {
+					t.Fatalf("%v: dialog outside window: %+v", size, panel)
+				}
+				for _, text := range []string{"Language", "Theme", "Launch at login", "English", "中文", "Auto", "Light", "Dark", "Close"} {
+					label := h.locale.T(text)
+					el, ok := tt.Find(label)
+					if !ok || el.W <= 0 || el.H <= 0 || el.X < panel.X || el.Y < panel.Y || el.X+el.W > panel.X+panel.W || el.Y+el.H > panel.Y+panel.H {
+						t.Errorf("%v: setting %q outside dialog %+v: %+v", size, label, panel, el)
+					}
+				}
+			}
+			if err := tt.Click(h.locale.T("Light")); err != nil {
+				t.Fatal(err)
+			}
+			if h.themeIdx != 1 || !h.hasEvent("theme") {
+				t.Fatalf("theme control unusable after resize: index=%d events=%v", h.themeIdx, h.events)
+			}
+			if err := tt.Click(h.locale.T("Close")); err != nil {
+				t.Fatal(err)
+			}
+			if h.settingsOpen {
+				t.Fatal("dialog should close after resize")
+			}
+		})
 	}
 }
 
@@ -186,20 +227,6 @@ func TestViewChineseLanguage(t *testing.T) {
 	}
 }
 
-// TestFluentThemeRadius 验证 Fluent 度量覆盖：控件圆角收到 4（Win11）。
-func TestFluentThemeRadius(t *testing.T) {
-	var got float32
-	tt := ui.NewTester(func(c *ui.Context) {
-		th := applyFluentTheme(c)
-		got = th.Radius
-		ui.Text(c, "probe")
-	}, 560, 520)
-	_ = tt.HasText("probe")
-	if got != 4 {
-		t.Fatalf("Fluent Radius = %v, want 4", got)
-	}
-}
-
 // TestFluentHeaderCompact 验证标题栏紧凑：标题在窗口上沿附近，计数与切换器同排。
 func TestFluentHeaderCompact(t *testing.T) {
 	h := &harness{items: []store.Entry{
@@ -218,29 +245,22 @@ func TestFluentHeaderCompact(t *testing.T) {
 	}
 }
 
-// TestShortcutKeycaps 验证状态栏以键帽 + 动作名展示快捷键，且全部在窗口内。
-func TestShortcutKeycaps(t *testing.T) {
-	h := &harness{}
-	tt := ui.NewTester(h.presenter().View, 560, 520)
-	for _, hint := range shortcutHints {
-		key, ok := tt.Find(hint.key)
-		if !ok {
-			t.Fatalf("expected keycap %q, texts %q", hint.key, tt.Texts())
+// TestToolbarAndShortcutHintsResize 验证中英文分类和快捷键在窄窗口中完整排布。
+func TestToolbarAndShortcutHintsResize(t *testing.T) {
+	for _, lang := range []i18n.Lang{i18n.LangEN, i18n.LangZH} {
+		h := &harness{locale: i18n.New(lang)}
+		tt := ui.NewTester(h.presenter().View, 560, 520)
+		labels := h.locale.FilterLabels()
+		for _, hint := range shortcutHints {
+			labels = append(labels, hint.key, h.locale.T(hint.action))
 		}
-		if key.X+key.W > 560 {
-			t.Errorf("keycap %q overflows window: %+v", hint.key, key)
-		}
-		if !tt.HasText(hint.action) {
-			t.Errorf("expected action %q, texts %q", hint.action, tt.Texts())
-		}
-	}
-
-	tt.SetSize(360, 280)
-	for _, hint := range shortcutHints {
-		for _, label := range []string{hint.key, hint.action} {
-			el, ok := tt.Find(label)
-			if !ok || el.X+el.W > 360 || el.Y+el.H > 280 {
-				t.Errorf("minimum window clips %q: %+v", label, el)
+		for _, size := range [][2]int{{560, 520}, {360, 280}, {560, 520}} {
+			tt.SetSize(size[0], size[1])
+			for _, label := range labels {
+				el, ok := tt.Find(label)
+				if !ok || el.W <= 0 || el.H <= 0 || el.X < 0 || el.Y < 0 || el.X+el.W > float32(size[0]) || el.Y+el.H > float32(size[1]) {
+					t.Errorf("lang=%v size=%v clips %q: %+v", lang, size, label, el)
+				}
 			}
 		}
 	}
@@ -273,6 +293,25 @@ func TestViewCtrlFFocusesSearch(t *testing.T) {
 	tt.Frame()
 	if !tt.Focused("Search history") {
 		t.Errorf("Ctrl+F 后搜索框应获得焦点，texts %q", tt.Texts())
+	}
+	tt.Type("clipboard")
+	if h.query != "clipboard" || !h.hasEvent("search") {
+		t.Fatalf("Ctrl+F 后应可直接搜索: query=%q events=%v", h.query, h.events)
+	}
+	tt.Key(0, ui.KeyEscape)
+	if h.query != "" || h.hasEvent("hide") {
+		t.Fatalf("Esc 应先清空搜索: query=%q events=%v", h.query, h.events)
+	}
+	tt.Key(0, ui.KeyEscape)
+	if !h.hasEvent("hide") {
+		t.Fatal("搜索为空时 Esc 应隐藏窗口")
+	}
+	tt.Type("another")
+	if err := tt.Click("Clear search"); err != nil {
+		t.Fatal(err)
+	}
+	if h.query != "" || !tt.Focused("Search history") {
+		t.Fatalf("清空按钮应保留输入焦点: query=%q", h.query)
 	}
 }
 

@@ -79,15 +79,3 @@ func (p *Presenter) t(en string) string { return p.loc().T(en) }
 
 // tpl 返回当前语言下的格式化文案。
 func (p *Presenter) tpl(en string, args ...any) string { return p.loc().Tpl(en, args...) }
-
-// items 返回当前条目快照。
-func (p *Presenter) items() []store.Entry {
-	return p.Snapshot().Items
-}
-
-func (p *Presenter) state() State { return p.Snapshot() }
-
-// chosen 返回当前选中索引。
-func (p *Presenter) chosen() int {
-	return p.Snapshot().Chosen
-}

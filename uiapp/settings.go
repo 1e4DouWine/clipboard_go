@@ -4,7 +4,7 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// settingsWidth 是设置对话框内容宽度（DIP）。
+// settingsWidth 是设置对话框的首选内容宽度（DIP），窄窗口下随面板收缩。
 const settingsWidth = 340
 
 // settingsModal 渲染设置对话框（ui.Modal：遮罩/Esc/关闭钮均可关）。
@@ -15,7 +15,7 @@ const settingsWidth = 340
 // （Esc 关闭），因此视图对它的读写都是直接写模型，不做缓存。
 func (p *Presenter) settingsModal(c *ui.Context, t *ui.Theme) {
 	ui.Modal(c.Key("settings-modal"), p.Config.SettingsOpen, func() {
-		ui.Column(c).Width(settingsWidth).Gap(t.Space(3)).Children(func() {
+		ui.Column(c).Width(settingsWidth).MaxWidthPercent(100).Gap(t.Space(3)).Children(func() {
 			// 标题行
 			ui.Row(c.Key("settings-title")).Gap(t.Space(2)).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, p.t("Settings")).FontSize(t.Rem(typeTitle)).FontWeight(600).Grow(1)
@@ -29,26 +29,26 @@ func (p *Presenter) settingsModal(c *ui.Context, t *ui.Theme) {
 				p.settingRow(c, t, "settings-lang", "Language", func() {
 					if ui.Segmented(c.Key("lang"), p.Config.LangIdx, "English", "中文").
 						Label(p.t("Language")).Changed() {
-						p.langChanged(*p.Config.LangIdx)
+						p.Actions.LangChanged(*p.Config.LangIdx)
 					}
 				})
 				// 主题
 				p.settingRow(c, t, "settings-theme", "Theme", func() {
 					if ui.Segmented(c.Key("theme"), p.Config.ThemeIdx, p.loc().ThemeLabels()...).
 						Label(p.t("Theme")).Changed() {
-						p.themeChanged(*p.Config.ThemeIdx)
+						p.Actions.ThemeChanged(*p.Config.ThemeIdx)
 					}
 				})
 				// 开机自启
 				p.settingRow(c, t, "settings-autostart", "Launch at login", func() {
 					if ui.Switch(c.Key("autostart"), p.Config.AutoStart).
 						Label(p.t("Launch at login")).Changed() {
-						p.toggleAutoStart(*p.Config.AutoStart)
+						p.Actions.ToggleAutoStart(*p.Config.AutoStart)
 					}
 				})
 			})
 		})
-	})
+	}).Label(p.t("Settings"))
 }
 
 // settingRow 渲染一行设置：左侧标签（英文源串，经翻译），右侧控件。
@@ -57,19 +57,4 @@ func (p *Presenter) settingRow(c *ui.Context, t *ui.Theme, key, label string, co
 		ui.Text(c, p.t(label)).FontSize(t.Rem(typeBody)).TextColor(t.Text).Grow(1)
 		control()
 	})
-}
-
-// langChanged 通知应用层切换界面语言。
-func (p *Presenter) langChanged(idx int) {
-	p.Actions.LangChanged(idx)
-}
-
-// themeChanged 通知应用层切换外观模式。
-func (p *Presenter) themeChanged(idx int) {
-	p.Actions.ThemeChanged(idx)
-}
-
-// toggleAutoStart 通知应用层设置开机自启。
-func (p *Presenter) toggleAutoStart(on bool) {
-	p.Actions.ToggleAutoStart(on)
 }

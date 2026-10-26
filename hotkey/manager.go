@@ -2,7 +2,6 @@ package hotkey
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -32,12 +31,7 @@ type Backend interface {
 type Manager struct {
 	backend Backend
 
-	// backendMu serializes the state transition and the corresponding backend
-	// calls. Without it, Unregister can remove a provisional mapping while a
-	// concurrent Register is still waiting in Backend.Register; when that
-	// registration then succeeds, the backend retains an untracked shortcut.
-	// Handlers must not synchronously call Manager registration methods because
-	// a backend is allowed to invoke them while a registration is in progress.
+	// backendMu 串行化状态变更与后端调用，mu 允许后端回调独立读取绑定。
 	backendMu sync.Mutex
 
 	mu       sync.Mutex        // 保护下面三张表；绝不跨 Backend 调用持有
@@ -46,17 +40,14 @@ type Manager struct {
 	handlers map[string]func() // action → 触发回调
 }
 
-// New 创建 Manager。backend 为 nil 视为编程错误。
-func New(backend Backend) (*Manager, error) {
-	if backend == nil {
-		return nil, fmt.Errorf("hotkey: Backend 不能为空")
-	}
+// New 创建 Manager，backend 必须由应用初始化时提供。
+func New(backend Backend) *Manager {
 	return &Manager{
 		backend:  backend,
 		byAction: map[string]string{},
 		byAcc:    map[string]string{},
 		handlers: map[string]func(){},
-	}, nil
+	}
 }
 
 // Register 把 action 绑定到全局快捷键 acc。
@@ -67,14 +58,8 @@ func New(backend Backend) (*Manager, error) {
 //   - action 未绑定：直接注册；若 acc 已被其他 action 占用返回 ErrConflict；
 //   - Backend 注册失败（通常被系统/其他程序占用）返回 ErrConflict，且不影响已有绑定。
 //
-// handler 为 nil 或 action 为空视为编程错误。
+// action 和 fn 由应用定义；acc 按用户输入校验。
 func (m *Manager) Register(action, acc string, fn func()) error {
-	if strings.TrimSpace(action) == "" {
-		return fmt.Errorf("hotkey: action 不能为空")
-	}
-	if fn == nil {
-		return fmt.Errorf("hotkey: action %q 的 handler 不能为空", action)
-	}
 	canon, err := normalize(acc) // 语法 + 安全策略 + 规范化
 	if err != nil {
 		return err
@@ -88,8 +73,6 @@ func (m *Manager) Register(action, acc string, fn func()) error {
 // caller must hold backendMu so state and backend cannot be interleaved with
 // another registration or unregistration.
 func (m *Manager) registerCanonical(action, canon string, fn func()) error {
-
-	// ── 第一段：在锁内做决策登记（不调用 Backend）──
 	m.mu.Lock()
 	old, hadOld := m.byAction[action]
 	if hadOld && old == canon {
@@ -98,47 +81,25 @@ func (m *Manager) registerCanonical(action, canon string, fn func()) error {
 		m.mu.Unlock()
 		return nil
 	}
-	if other, taken := m.byAcc[canon]; taken && other != action {
+	if other, taken := m.byAcc[canon]; taken {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %q 已绑定到 %q", ErrConflict, canon, other)
 	}
-	// 预登记：占用目标键，防止并发 Register 同键互相通过检查。
-	//（若最终注册失败或被他人抢先，由后续分支回滚。）
-	m.byAcc[canon] = action
-	m.byAction[action] = canon
-	m.handlers[action] = fn
 	m.mu.Unlock()
 
-	// ── 第二段：调用 Backend（不持锁，避免主线程回调死锁）──
 	if err := m.backend.Register(canon, m.wrap(action, canon)); err != nil {
-		// 回滚预登记，保持表与 Backend 一致。
-		m.mu.Lock()
-		if m.byAcc[canon] == action {
-			delete(m.byAcc, canon)
-		}
-		if m.byAction[action] == canon {
-			if hadOld {
-				m.byAction[action] = old // 恢复旧键映射
-			} else {
-				delete(m.byAction, action)
-				delete(m.handlers, action)
-			}
-		}
-		m.mu.Unlock()
 		return fmt.Errorf("%w: 注册 %q 失败（可能已被其他程序占用）: %v", ErrConflict, canon, err)
 	}
 
-	// ── 第三段：注册成功，注销旧键（若有）──
+	// backendMu 串行化注册操作；后端成功后才提交新绑定。
+	m.mu.Lock()
+	m.byAcc[canon] = action
+	m.byAction[action] = canon
+	m.handlers[action] = fn
+	delete(m.byAcc, old)
+	m.mu.Unlock()
 	if hadOld {
-		m.mu.Lock()
-		stale := m.byAcc[old] == action && old != canon
-		if stale {
-			delete(m.byAcc, old) // 旧键不再归本 action
-		}
-		m.mu.Unlock()
-		if stale {
-			m.backend.Unregister(old) // 锁外注销，过期触发由 wrap() 过滤
-		}
+		m.backend.Unregister(old)
 	}
 	return nil
 }
@@ -148,9 +109,7 @@ func (m *Manager) registerCanonical(action, canon string, fn func()) error {
 func (m *Manager) Reregister(action, acc string) error {
 	m.backendMu.Lock()
 	defer m.backendMu.Unlock()
-	m.mu.Lock()
-	fn := m.handlers[action]
-	m.mu.Unlock()
+	fn := m.handler(action)
 	if fn == nil {
 		return fmt.Errorf("%w: %q", ErrUnknownAction, action)
 	}
@@ -173,7 +132,7 @@ func (m *Manager) unregisterCanonical(action string) {
 	canon, ok := m.byAction[action]
 	delete(m.byAction, action)
 	delete(m.handlers, action)
-	if ok && m.byAcc[canon] == action {
+	if ok {
 		delete(m.byAcc, canon)
 	}
 	m.mu.Unlock()
@@ -190,12 +149,12 @@ func (m *Manager) UnregisterAll() {
 	defer m.backendMu.Unlock()
 	m.mu.Lock()
 	accs := make([]string, 0, len(m.byAction))
-	for action, canon := range m.byAction {
+	for _, canon := range m.byAction {
 		accs = append(accs, canon)
-		delete(m.byAction, action)
-		delete(m.handlers, action)
-		delete(m.byAcc, canon)
 	}
+	clear(m.byAction)
+	clear(m.handlers)
+	clear(m.byAcc)
 	m.mu.Unlock()
 
 	for _, canon := range accs {

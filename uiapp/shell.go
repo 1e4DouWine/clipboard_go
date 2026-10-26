@@ -73,25 +73,13 @@ func (p *Presenter) View(c *ui.Context) {
 	settingsWasOpen := *p.Config.SettingsOpen
 
 	// 窗口级快捷键（与搜索框焦点无关）：↑↓ 选择、Enter 粘贴、Del 删除、Ctrl+D 收藏。
-	if c.Shortcut(0, ui.KeyDown) {
-		p.moveChosen(1)
-	}
-	if c.Shortcut(0, ui.KeyUp) {
-		p.moveChosen(-1)
-	}
-	if c.Shortcut(0, ui.KeyEnter) {
-		p.activate(p.chosen())
-	}
-	if c.Shortcut(0, ui.KeyDelete) {
-		p.deleteChosen()
-	}
-	if c.Shortcut(ui.Cmd, ui.KeyD) {
-		p.toggleFavorite()
-	}
+	c.OnShortcut(0, ui.KeyDown, func() { p.moveChosen(1) })
+	c.OnShortcut(0, ui.KeyUp, func() { p.moveChosen(-1) })
+	c.OnShortcut(0, ui.KeyEnter, func() { p.Actions.Activate(p.Snapshot().Chosen) })
+	c.OnShortcut(0, ui.KeyDelete, p.Actions.DeleteChosen)
+	c.OnShortcut(ui.Cmd, ui.KeyD, p.Actions.ToggleFavorite)
 	// Ctrl+Q 退出应用（关窗只是隐藏，后台常驻，没有它就无法真正退出）。
-	if c.Shortcut(ui.Cmd, ui.KeyQ) {
-		p.quit()
-	}
+	c.OnShortcut(ui.Cmd, ui.KeyQ, p.Actions.Quit)
 	// Ctrl+F 聚焦搜索框；Esc 优先关设置，其次隐藏窗口（搜索框内先由其自身清空内容）。
 	c.OnShortcut(ui.Cmd, ui.KeyF, func() { p.search.Focus(c) })
 	c.OnShortcut(0, ui.KeyEscape, func() {
@@ -102,7 +90,7 @@ func (p *Presenter) View(c *ui.Context) {
 		if settingsWasOpen {
 			return // 本帧 Modal 已用 Esc 关闭设置
 		}
-		p.hideWindow()
+		p.Actions.HideWindow()
 	})
 
 	ui.Column(c).Fill().Gap(0).Children(func() {
@@ -120,35 +108,10 @@ func (p *Presenter) View(c *ui.Context) {
 // 命令发出后读回最新索引再滚动，避免两边各自维护一份选中位置。
 func (p *Presenter) moveChosen(delta int) {
 	p.Actions.MoveChosen(delta)
-	idx := p.chosen()
-	if idx >= 0 && idx < len(p.items()) {
-		p.list.ScrollIntoView(idx)
+	state := p.Snapshot()
+	if state.Chosen >= 0 && state.Chosen < len(state.Items) {
+		p.list.ScrollIntoView(state.Chosen)
 	}
-}
-
-// activate 激活（粘贴）指定条目。
-func (p *Presenter) activate(i int) {
-	p.Actions.Activate(i)
-}
-
-// deleteChosen 删除选中条目。
-func (p *Presenter) deleteChosen() {
-	p.Actions.DeleteChosen()
-}
-
-// toggleFavorite 切换选中条目的收藏。
-func (p *Presenter) toggleFavorite() {
-	p.Actions.ToggleFavorite()
-}
-
-// hideWindow 隐藏主窗口。
-func (p *Presenter) hideWindow() {
-	p.Actions.HideWindow()
-}
-
-// quit 退出应用。
-func (p *Presenter) quit() {
-	p.Actions.Quit()
 }
 
 // header 渲染紧凑标题栏：应用图标块 + 标题 + 条目计数 + 设置入口（单行）。
@@ -164,7 +127,7 @@ func (p *Presenter) header(c *ui.Context, t *ui.Theme) {
 		ui.Text(c, p.t("Clipboard History")).FontSize(t.Rem(typeTitle)).FontWeight(600).
 			SingleLine().Grow(1)
 		// 条目计数：安静的 Caption 文本。
-		ui.Text(c, p.tpl("%d items", len(p.items()))).
+		ui.Text(c, p.tpl("%d items", len(p.Snapshot().Items))).
 			FontSize(t.Rem(typeCaption)).TextColor(t.TextMuted).SingleLine()
 		// 设置入口：右上角齿轮，打开设置 Modal（语言/主题/开机自启）。
 		iconButton(c, t, "settings-btn", settingsIcon, p.t("Settings"), func() {
@@ -196,33 +159,48 @@ func (p *Presenter) toolbar(c *ui.Context, t *ui.Theme) {
 	ui.Column(c.Key("toolbar")).Padding(0, t.Space(4), t.Space(2)).
 		Gap(t.Space(2)).Children(func() {
 		// 搜索框：占满整行，输入即时过滤。
-		search := ui.SearchField(c.Key("search"), p.Config.Query).
-			Bind(&p.search).Label(p.t("Search history")).Grow(1)
-		search.Placeholder(p.t("Search history"))
-		if search.Changed() {
-			p.searchChanged()
-		}
+		p.searchField(c, t)
 		// 分类过滤器：全部/文本/链接/代码/图片/收藏。
 		if ui.Segmented(c.Key("filter"), p.Config.Filter, p.loc().FilterLabels()...).
-			Label(p.t("Filter")).Changed() {
-			p.filterChanged()
+			Wrap().Label(p.t("Filter")).Changed() {
+			p.Actions.FilterChanged()
 		}
 	})
 }
 
-// searchChanged 通知应用层搜索词已变（由应用层决定防抖与重载时机）。
-func (p *Presenter) searchChanged() {
-	p.Actions.SearchChanged()
-}
-
-// filterChanged 通知应用层分类过滤已变。
-func (p *Presenter) filterChanged() {
-	p.Actions.FilterChanged()
+// searchField 把持久焦点绑定在实际输入控件上，支持 Ctrl+F 后直接输入。
+func (p *Presenter) searchField(c *ui.Context, t *ui.Theme) {
+	field := ui.Row(c.Key("search")).AlignItems(ui.Center).Gap(t.Space(1.5)).
+		Padding(t.Space(1.5), t.Space(2)).Radius(t.Radius).Background(t.Surface).
+		Border(1, t.Border).Cursor(ui.CursorText)
+	field.OnClick(func() { p.search.Focus(c) }).Children(func() {
+		ui.Icon(c, searchIcon).Size(kindIconSize, kindIconSize).TextColor(t.TextMuted).Shrink(0)
+		input := ui.TextInputBase(c.Key("query"), p.Config.Query).Bind(&p.search).
+			Grow(1).MinWidth(t.Space(15)).Label(p.t("Search history")).
+			Placeholder(p.t("Search history")).OnChange(p.Actions.SearchChanged)
+		if *p.Config.Query != "" {
+			clear := func() {
+				*p.Config.Query = ""
+				p.Actions.SearchChanged()
+				p.search.Focus(c)
+			}
+			input.OnShortcut(0, ui.KeyEscape, clear)
+			ui.ButtonBase(c.Key("clear")).Size(kindIconSize, kindIconSize).Shrink(0).
+				KeepFocus().Label(p.t("Clear search")).Center().OnClick(clear).Children(func() {
+				ui.Icon(c, closeIcon).Size(kindIconSize, kindIconSize).TextColor(t.TextMuted)
+			})
+		}
+	})
+	if p.search.Focused(c) {
+		field.BorderColor(t.Accent)
+	} else if field.Hovered() {
+		field.BorderColor(t.TextMuted)
+	}
 }
 
 // emptyState 渲染空状态：区分"加载中""没有历史"与"过滤无结果"三种场景。
 func (p *Presenter) emptyState(c *ui.Context, t *ui.Theme, loading bool) {
-	if len(p.items()) > 0 {
+	if len(p.Snapshot().Items) > 0 {
 		return
 	}
 	ui.Column(c).Fill().Center().Padding(t.Space(8)).Gap(t.Space(2)).Children(func() {
@@ -268,9 +246,9 @@ var shortcutHints = []struct{ key, action string }{
 // 顶部一条极细发丝线，把列表与页脚轻轻分开（Fluent 页脚习惯）。
 func (p *Presenter) statusBar(c *ui.Context, t *ui.Theme) {
 	ui.Row(c.Key("statusbar")).Padding(t.Space(2), t.Space(4)).
-		Gap(t.Space(1)).AlignItems(ui.Center).ClipX().
+		Gap(t.Space(1)).AlignItems(ui.Center).Wrap().
 		BorderWidth(1, 0, 0, 0).BorderColor(t.Border.Alpha(0.6)).Children(func() {
-		state := p.state()
+		state := p.Snapshot()
 		if state.Loading && len(state.Items) > 0 {
 			ui.Text(c, p.t("Loading history...")).
 				FontSize(t.Rem(typeCaption)).TextColor(t.TextMuted).SingleLine()

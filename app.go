@@ -63,7 +63,6 @@ type paster interface {
 type loginOps interface {
 	SetOpenAtLogin(open bool) error // 设置开机自启，失败返回 error
 	OpenAtLogin() bool              // 查询当前是否开机自启
-	WasOpenedAtLogin() bool         // 本次是否由登录启动（静默后台判定）
 }
 
 // quitOps 是退出应用能力的最小依赖。
@@ -133,13 +132,10 @@ type app struct {
 	searchGen     uint64        // 使已排队的旧计时器回调失效
 
 	reloadGen      uint64
-	reloadInFlight bool
 	pendingReload  *reloadRequest
 	loading        bool
 	pendingActions []deferredListAction
-	queryHistory   func(store.Filter, int) ([]store.Entry, error) // 测试可注入查询
-
-	ui *uiapp.Presenter // 视图（渲染与交互，持有控件状态）
+	queryHistory   func(store.Filter, int) ([]store.Entry, error)
 }
 
 // ---- 数据加载与过滤 ----
@@ -165,8 +161,7 @@ func (a *app) reload() {
 		Kind:          uiapp.FilterKind(a.filter),
 		FavoritesOnly: a.filter == filterFavorites,
 	}}
-	a.loading = true
-	if a.reloadInFlight {
+	if a.loading {
 		a.pendingReload = req
 		return
 	}
@@ -174,23 +169,15 @@ func (a *app) reload() {
 }
 
 func (a *app) startReload(req reloadRequest) {
-	a.reloadInFlight = true
 	a.loading = true
-	st, win, query := a.st, a.win, a.queryHistory
+	win, query := a.win, a.queryHistory
 	go func() {
-		var entries []store.Entry
-		var err error
-		if query != nil {
-			entries, err = query(req.filter, maxVisible)
-		} else {
-			entries, err = st.ListFiltered(req.filter, maxVisible)
-		}
+		entries, err := query(req.filter, maxVisible)
 		win.Update(func() { a.finishReload(req, entries, err) })
 	}()
 }
 
 func (a *app) finishReload(req reloadRequest, entries []store.Entry, err error) {
-	a.reloadInFlight = false
 	if a.quitting {
 		a.pendingReload = nil
 		a.pendingActions = nil
@@ -236,17 +223,13 @@ func (a *app) runPendingActions() {
 	}
 }
 
-func (a *app) deferListAction(action deferredListAction) {
-	a.pendingActions = append(a.pendingActions, action)
-}
-
 // waitForLatest defers list actions until the current query and any newer
 // coalesced query have completed.
 func (a *app) waitForLatest(action deferredListAction) bool {
-	if !a.searchPending && !a.loading && !a.reloadInFlight && a.pendingReload == nil {
+	if !a.searchPending && !a.loading {
 		return false
 	}
-	a.deferListAction(action)
+	a.pendingActions = append(a.pendingActions, action)
 	if a.searchPending {
 		a.flushSearch()
 	}
@@ -255,16 +238,7 @@ func (a *app) waitForLatest(action deferredListAction) bool {
 
 // clampChosen 把选中索引收敛到合法范围（列表变短/清空时不越界）。
 func (a *app) clampChosen() {
-	if len(a.items) == 0 {
-		a.chosen = 0
-		return
-	}
-	if a.chosen >= len(a.items) {
-		a.chosen = len(a.items) - 1
-	}
-	if a.chosen < 0 {
-		a.chosen = 0
-	}
+	a.chosen = max(0, min(a.chosen, len(a.items)-1))
 }
 
 // moveChosen 上下移动选中项，越界钳制。
@@ -488,14 +462,9 @@ func (a *app) newPresenter() *uiapp.Presenter {
 		ToggleAutoStart: a.toggleAutoStart,
 		ThemeChanged:    a.setTheme,
 		LangChanged:     a.setLang,
-		HideWindow:      a.hideWindow,
-		Quit:            a.quit,
+		HideWindow:      func() { a.win.Hide() },
+		Quit:            a.quitter.Quit,
 	})
-}
-
-// hideWindow 隐藏主窗口（Esc）。
-func (a *app) hideWindow() {
-	a.win.Hide()
 }
 
 // onSearchChanged 搜索词变化（视图回调，主线程执行）。
@@ -508,7 +477,6 @@ func (a *app) onSearchChanged() {
 	a.searchGen++
 	gen := a.searchGen
 	if a.searchDelay <= 0 {
-		a.searchPending = false
 		a.reload()
 		return
 	}
@@ -524,7 +492,6 @@ func (a *app) onSearchTimer(gen uint64) {
 		if gen != a.searchGen || !a.searchPending {
 			return
 		}
-		a.searchPending = false
 		a.reload()
 	})
 }
@@ -536,10 +503,6 @@ func (a *app) onSearchTimer(gen uint64) {
 func (a *app) flushSearch() bool {
 	if !a.searchPending {
 		return false
-	}
-	a.searchPending = false
-	if a.searchTimer != nil {
-		a.searchTimer.Stop()
 	}
 	a.reload()
 	return true
@@ -553,11 +516,6 @@ func (a *app) stopSearchTimer() {
 		a.searchTimer = nil
 	}
 	a.searchPending = false
-}
-
-// quit 退出应用（视图回调，主线程执行）。
-func (a *app) quit() {
-	a.quitter.Quit()
 }
 
 // markQuitting 标记应用正在退出（OnBeforeQuit 回调，主线程执行）。

@@ -9,12 +9,7 @@ package watch
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
-	"fmt"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -81,7 +76,7 @@ var DefaultSensitiveTitles = []string{
 }
 
 // Watcher 是后台剪贴板监听器。零值不可用，请通过 New 创建。
-// 所有方法并发安全：Run 在后台 goroutine 运行，SetEnabled 可随时从任意 goroutine 调用。
+// Run 由单个后台 goroutine 调用，SetEnabled 可从任意 goroutine 调用。
 type Watcher struct {
 	clip      Clipboard
 	store     *store.Store
@@ -93,21 +88,11 @@ type Watcher struct {
 	foregnd   func() string
 
 	enabled  atomic.Bool // 捕获开关（可临时暂停捕获，如复制密码时）
-	lastMu   sync.Mutex  // 保护 lastHash/lastFP（poll 与潜在的多实例调用）
 	lastHash string      // 上次入库内容的哈希，用于去重
-	lastFP   string      // 上次图片指纹，用于大图片未变化时短路（见 fingerprint）
 }
 
-// New 校验并归一化配置，创建监听器。
-func New(opts Options) (*Watcher, error) {
-	// 边界：依赖缺失属于编程错误，启动期即失败，避免运行期空指针。
-	if opts.Clipboard == nil {
-		return nil, errors.New("watch: Clipboard 不能为空")
-	}
-	if opts.Store == nil {
-		return nil, errors.New("watch: Store 不能为空")
-	}
-
+// New 创建监听器。Clipboard 和 Store 必须由应用初始化时提供。
+func New(opts Options) *Watcher {
 	interval := opts.Interval
 	if interval <= 0 {
 		interval = DefaultInterval
@@ -148,7 +133,7 @@ func New(opts Options) (*Watcher, error) {
 		foregnd:   foregnd,
 	}
 	w.enabled.Store(true) // 默认开启捕获
-	return w, nil
+	return w
 }
 
 // SetEnabled 开/关捕获。关闭期间轮询继续但不入库，
@@ -183,15 +168,9 @@ func (w *Watcher) poll(ctx context.Context) {
 		return
 	}
 
-	snap, hash, unchanged := w.readSnapshot()
-	if unchanged {
-		return // 大图片指纹未变化：跳过全量哈希/确认/入库（稳态零开销）
-	}
-	if hash == "" {
-		return // 剪贴板为空或读取失败（被占用）：静默跳过，下轮重试
-	}
-	if w.sameAsLast(hash) {
-		return // 去重：与上次入库内容一致
+	_, hash := w.readSnapshot()
+	if hash == "" || hash == w.lastHash {
+		return
 	}
 
 	// 防抖确认：稍等片刻再读一次，以稳定后的内容为准。
@@ -202,20 +181,16 @@ func (w *Watcher) poll(ctx context.Context) {
 		return
 	case <-time.After(w.settle):
 	}
-	snap2, hash2, unchanged2 := w.readSnapshot()
-	if hash2 == "" || unchanged2 {
-		return // 确认时内容已清空或回到已记录图片，丢弃瞬态采样
-	}
-	snap, hash = snap2, hash2
-	if w.sameAsLast(hash) {
-		return // 确认后内容回落到上次值，无需处理
+	snap, hash := w.readSnapshot()
+	if hash == "" || hash == w.lastHash {
+		return
 	}
 
 	// 敏感过滤：命中黑名单窗口则跳过，并记录哈希避免反复检查。
 	// 同一前台窗口标题也作为来源信息入库（可能为空字符串）。
 	title := strings.TrimSpace(w.foregnd())
 	if w.isSensitive(title) {
-		w.markLast(hash, snap)
+		w.lastHash = hash
 		return
 	}
 
@@ -228,7 +203,7 @@ func (w *Watcher) poll(ctx context.Context) {
 		}
 		return
 	}
-	w.markLast(hash, snap)
+	w.lastHash = hash
 
 	if w.onCapture != nil {
 		w.onCapture(entry) // 回调在监听 goroutine 上，上层须自行转主线程
@@ -241,56 +216,16 @@ type snapshot struct {
 	image []byte
 }
 
-// fingerprint 是内容的廉价指纹（长度 + 首尾采样哈希），用于"未变化"快速判断。
-//
-// 内存/CPU 优化背景：剪贴板常驻一张大图片时，每次轮询都对整个图片做
-// sha256（8MB ≈ 数毫秒 CPU）会产生持续的分配与 GC 压力。指纹只哈希
-// 首尾各 64KB：指纹不同才计算全量哈希与入库；指纹相同直接短路。
-// 理论上存在"首尾相同、中间不同"的漏判（概率极低），后果只是该次
-// 变化延迟到下一轮指纹变化时被捕获，不影响最终一致性。
-func fingerprint(data []byte) string {
-	const sample = 64 * 1024
-	h := sha256.New()
-	// 长度先行混入：长度不同的内容必然指纹不同。
-	fmt.Fprintf(h, "%d:", len(data))
-	head := data
-	if len(head) > sample {
-		head = head[:sample]
-	}
-	h.Write(head)
-	if len(data) > sample {
-		tail := data[len(data)-sample:]
-		h.Write(tail)
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// readSnapshot 读取当前剪贴板内容并返回内容哈希。
-//
-// 优先级：图片非空按图片处理（部分软件复制图片时同时提供占位文本，
-// 以图片为准更符合用户直觉）；两者都空返回空哈希表示"无内容"。
-//
-// 返回值 unchanged 表示图片指纹与上次一致（内容大概率未变化），
-// 调用方可跳过全量哈希、确认重读与入库流程。
-func (w *Watcher) readSnapshot() (snap snapshot, hash string, unchanged bool) {
-	// 图片读取失败返回 nil，与"没有图片"无法区分，均按无图片处理（下轮重试）。
-	img := w.clip.ReadImage()
-	if len(img) > 0 {
-		// 指纹短路：大图片未变化时避免全量 sha256（内存/CPU 抖动的主要来源）。
-		fp := fingerprint(img)
-		w.lastMu.Lock()
-		same := fp == w.lastFP && w.lastFP != ""
-		w.lastMu.Unlock()
-		if same {
-			return snapshot{}, "", true
-		}
-		return snapshot{image: img}, hashBytes(img), false
+// readSnapshot 读取完整内容并计算哈希，图片优先。
+func (w *Watcher) readSnapshot() (snapshot, string) {
+	if img := w.clip.ReadImage(); len(img) > 0 {
+		return snapshot{image: img}, store.HashBytes(img)
 	}
 	text := w.clip.ReadText()
 	if strings.TrimSpace(text) == "" {
-		return snapshot{}, "", false // 空文本不入库（store 也会拒绝，这里提前短路）
+		return snapshot{}, ""
 	}
-	return snapshot{text: text}, hashBytes([]byte(text)), false
+	return snapshot{text: text}, store.HashBytes([]byte(text))
 }
 
 // capture 将稳定后的内容写入 store；图片与文本走不同入库路径。
@@ -299,25 +234,6 @@ func (w *Watcher) capture(snap snapshot, sourceApp string) (store.Entry, error) 
 		return w.store.AddImage(snap.image, sourceApp)
 	}
 	return w.store.AddText(snap.text, sourceApp)
-}
-
-// sameAsLast 判断内容哈希是否与上次入库一致（去重用）。
-func (w *Watcher) sameAsLast(hash string) bool {
-	w.lastMu.Lock()
-	defer w.lastMu.Unlock()
-	return hash != "" && hash == w.lastHash
-}
-
-// markLast 记录已处理（入库或有意跳过）的内容哈希；图片内容同时记录指纹。
-func (w *Watcher) markLast(hash string, snap snapshot) {
-	w.lastMu.Lock()
-	defer w.lastMu.Unlock()
-	w.lastHash = hash
-	if len(snap.image) > 0 {
-		w.lastFP = fingerprint(snap.image) // 记录指纹供下轮短路
-	} else {
-		w.lastFP = "" // 文本内容清空图片指纹，避免误短路
-	}
 }
 
 // isSensitive 判断窗口标题是否命中敏感名单（忽略大小写的子串匹配）。
@@ -334,9 +250,3 @@ func (w *Watcher) isSensitive(title string) bool {
 	}
 	return false
 }
-
-// hashBytes 计算内容的 sha256 十六进制摘要。
-//
-// 复用 store 的实现：监听器与存储层必须用同一套哈希算法，
-// 否则"上次已入库"的判定会与去重键漂移。
-func hashBytes(b []byte) string { return store.HashBytes(b) }

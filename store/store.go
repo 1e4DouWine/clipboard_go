@@ -20,8 +20,6 @@ var (
 	ErrTooLarge = errors.New("store: 内容超过单条上限")
 	// ErrNotFound 表示按 ID 未找到条目（可能已被淘汰或删除）。
 	ErrNotFound = errors.New("store: 条目不存在")
-	// ErrClosed 表示 Store 已被 Close，调用方应停止使用。
-	ErrClosed = errors.New("store: 已关闭")
 )
 
 // DefaultMaxEntries 是默认历史条目上限（含收藏）。
@@ -55,9 +53,9 @@ func (o Options) maxEntriesOrDefault() int {
 // Store 是历史持久化的入口。所有方法并发安全（内部串行化）。
 type Store struct {
 	mu         sync.Mutex // 串行化所有数据库访问，避免 SQLITE_BUSY 与读改写竞态
-	db         *sql.DB    // Close 后置 nil
-	dataDir    string     // 数据目录绝对/相对路径，图片相对路径的基准
-	maxEntries int        // 条目上限
+	db         *sql.DB
+	dataDir    string // 数据目录绝对/相对路径，图片相对路径的基准
+	maxEntries int    // 条目上限
 }
 
 // DataDir 返回数据目录路径（图片绝对路径拼接用）。
@@ -89,9 +87,6 @@ func (s *Store) AddText(text, sourceApp string) (Entry, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return Entry{}, ErrClosed
-	}
 
 	// upsert：冲突（同 content_hash）时只刷新最近复制时间与来源应用。
 	if _, err := s.db.Exec(`
@@ -122,9 +117,7 @@ func (s *Store) AddText(text, sourceApp string) (Entry, error) {
 func (s *Store) Get(id int64) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return Entry{}, ErrClosed
-	}
+
 	e, err := scanEntry(s.db.QueryRow(selectColumns+` WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Entry{}, ErrNotFound
@@ -208,9 +201,7 @@ func (s *Store) listFiltered(f Filter, limit int, brief bool) ([]Entry, error) {
 func (s *Store) Delete(id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return ErrClosed
-	}
+
 	// 先取出图片路径再删除，避免删完后无法定位文件。
 	var imagePath sql.NullString
 	if err := s.db.QueryRow(`SELECT image_path FROM entries WHERE id = ?`, id).Scan(&imagePath); err != nil {
@@ -235,22 +226,16 @@ func (s *Store) Delete(id int64) error {
 func (s *Store) ToggleFavorite(id int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return false, ErrClosed
+
+	var fav bool
+	err := s.db.QueryRow(`UPDATE entries SET is_favorite = 1 - is_favorite WHERE id = ? RETURNING is_favorite`, id).Scan(&fav)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
 	}
-	// UPDATE 后再读回状态，天然处理"条目不存在"的情况。
-	res, err := s.db.Exec(`UPDATE entries SET is_favorite = 1 - is_favorite WHERE id = ?`, id)
 	if err != nil {
 		return false, fmt.Errorf("store: 切换收藏失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return false, ErrNotFound
-	}
-	var fav int
-	if err := s.db.QueryRow(`SELECT is_favorite FROM entries WHERE id = ?`, id).Scan(&fav); err != nil {
-		return false, fmt.Errorf("store: 读取收藏状态失败: %w", err)
-	}
-	return fav == 1, nil
+	return fav, nil
 }
 
 // Clear 清空历史。keepFavorites 为 true 时保留收藏条目。
@@ -258,9 +243,7 @@ func (s *Store) ToggleFavorite(id int64) (bool, error) {
 func (s *Store) Clear(keepFavorites bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return ErrClosed
-	}
+
 	where := `TRUE` // 全部删除
 	if keepFavorites {
 		where = `is_favorite = 0`
@@ -279,7 +262,11 @@ func (s *Store) Clear(keepFavorites bool) error {
 		}
 		paths = append(paths, p)
 	}
+	err = rows.Err()
 	_ = rows.Close() // 提前关闭，避免与后续写操作在单连接上互相阻塞
+	if err != nil {
+		return fmt.Errorf("store: 读取待清理图片失败: %w", err)
+	}
 
 	if _, err := s.db.Exec(`DELETE FROM entries WHERE ` + where); err != nil {
 		return fmt.Errorf("store: 清空历史失败: %w", err)
@@ -296,9 +283,7 @@ func (s *Store) Clear(keepFavorites bool) error {
 func (s *Store) GetSetting(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return "", false, ErrClosed
-	}
+
 	var v string
 	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -314,9 +299,7 @@ func (s *Store) GetSetting(key string) (string, bool, error) {
 func (s *Store) SetSetting(key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return ErrClosed
-	}
+
 	if strings.TrimSpace(key) == "" {
 		return errors.New("store: 配置 key 不能为空") // 边界：空 key 无意义，直接拒绝
 	}
@@ -360,14 +343,12 @@ func (s *Store) getEntryByHashLocked(hash string) (Entry, error) {
 func (s *Store) queryEntries(query string, args ...any) ([]Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return nil, ErrClosed
-	}
+
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询历史失败: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // 关闭失败不影响结果语义
+	defer rows.Close()
 
 	// 预分配少量容量：大多数查询会带 limit，先按 64 起步减少扩容。
 	entries := make([]Entry, 0, 64)
@@ -416,7 +397,11 @@ func (s *Store) purgeLocked() error {
 			paths = append(paths, p)
 		}
 	}
+	err = rows.Err()
 	_ = rows.Close()
+	if err != nil {
+		return fmt.Errorf("store: 读取待淘汰条目失败: %w", err)
+	}
 
 	for _, id := range ids {
 		if _, err := s.db.Exec(`DELETE FROM entries WHERE id = ?`, id); err != nil {
